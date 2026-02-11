@@ -1,0 +1,34 @@
+[package]
+name = "montygate-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core library for MontyGate - MCP server aggregation and Monty execution"
+
+[dependencies]
+# Workspace dependencies
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+dashmap.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+regex.workspace = true
+governor.workspace = true
+once_cell.workspace = true
+parking_lot.workspace = true
+
+# Execution engine (placeholder for Monty integration)
+# We'll use a trait-based approach so Monty can be plugged in
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile.workspace = true
+mockall.workspace = true

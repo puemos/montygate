@@ -1,0 +1,35 @@
+[package]
+name = "montygate-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI binary for MontyGate MCP server"
+
+[[bin]]
+name = "montygate"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+montygate-core = { path = "../montygate-core" }
+montygate-mcp = { path = "../montygate-mcp" }
+rmcp.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+config.workspace = true
+toml.workspace = true
+
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile.workspace = true

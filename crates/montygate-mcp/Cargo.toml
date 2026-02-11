@@ -1,0 +1,30 @@
+[package]
+name = "montygate-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MCP protocol handling for MontyGate"
+
+[dependencies]
+# Workspace dependencies
+montygate-core = { path = "../montygate-core" }
+rmcp.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tokio-util.workspace = true
+reqwest.workspace = true
+eventsource-client.workspace = true
+schemars.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4"
+wiremock.workspace = true
+tempfile.workspace = true
