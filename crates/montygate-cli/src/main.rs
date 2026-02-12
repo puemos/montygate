@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    info!("Starting MontyGate v{}", env!("CARGO_PKG_VERSION"));
+    info!("Starting Montygate v{}", env!("CARGO_PKG_VERSION"));
 
     match args.command {
         Commands::Run {

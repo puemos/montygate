@@ -5,23 +5,20 @@
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green" alt="License" /></a>
 </p>
 
-<h1 align="center">MontyGate</h1>
+<h1 align="center">Montygate</h1>
 
 <p align="center">
-  <strong>One MCP tool to rule them all.</strong><br>
   Aggregate N downstream MCP servers into a single <code>run_program</code> tool.<br>
-  The LLM writes Python. MontyGate executes it in a sandbox.
+  The LLM writes Python. Montygate executes it in a sandbox.
 </p>
 
 ---
 
-## The Problem
+## What It Does
 
-Every tool call is a full LLM round-trip. 5 sequential calls = 5 turns of latency, context, and cost. Connect multiple MCP servers and each interaction fans out into a chain of individual calls. It doesn't scale.
+Each MCP tool call is a full LLM round-trip. Connecting multiple MCP servers means each interaction fans out into a chain of individual calls.
 
-## The Solution
-
-MontyGate takes a fundamentally different approach: **N servers &rarr; 1 server &rarr; 1 tool**.
+Montygate aggregates N downstream servers behind a single `run_program` tool. The LLM sends one call containing a Python script; that script can invoke any downstream tool via `tool("server.tool_name", ...)`. All calls execute in a single round-trip.
 
 ```
  ┌──────────────────────────────────────────────────┐
@@ -31,7 +28,7 @@ MontyGate takes a fundamentally different approach: **N servers &rarr; 1 server 
                     │ MCP protocol
                     ▼
  ┌──────────────────────────────────────────────────┐
- │                  MontyGate                        │
+ │                  Montygate                        │
  │                                                   │
  │  ┌────────────┐ ┌─────────────┐ ┌─────────────┐  │
  │  │ MCP Server │ │ Monty Engine│ │Tool Registry │  │
@@ -203,7 +200,7 @@ You should see tools like `fetch.fetch`, `memory.create_entities`, `everything.e
 
 ### 3. Connect and use
 
-Add MontyGate to Claude Desktop (or any MCP client):
+Add Montygate to Claude Desktop (or any MCP client):
 
 ```json
 {
@@ -235,13 +232,13 @@ result = tool("memory.read_graph")
 tool("everything.echo", message=f"Stored {len(result)} entities")
 ```
 
-**3 servers, 4 tool calls, 1 round-trip.** Without MontyGate this would be 4 separate LLM round-trips.
+3 servers, 4 tool calls, 1 round-trip. Without Montygate this would be 4 separate LLM round-trips.
 
 > **Note on token savings:** Tool schemas are still communicated to the LLM (in the `run_program` tool description), so the up-front schema cost is relocated rather than eliminated. The primary wins are **batch execution** (N tool calls in 1 round-trip) and **programmatic orchestration** (conditionals, loops, data transformation between calls).
 
 ## Python Subset
 
-MontyGate uses the [Monty interpreter](https://github.com/pydantic/monty) (v0.0.4), a sandboxed Python implementation in Rust. It supports variables, arithmetic, strings, lists, dicts, control flow, function definitions, f-strings, try/except, comprehensions, slicing, `print()`, and `tool()` calls. User-defined classes and `import` of arbitrary modules are not available.
+Montygate uses the [Monty interpreter](https://github.com/pydantic/monty) (v0.0.4), a sandboxed Python implementation in Rust. It supports variables, arithmetic, strings, lists, dicts, control flow, function definitions, f-strings, try/except, comprehensions, slicing, `print()`, and `tool()` calls. User-defined classes and `import` of arbitrary modules are not available.
 
 See [docs/python-support.md](docs/python-support.md) for the full reference.
 
@@ -284,7 +281,7 @@ montygate/
 
 ```
 LLM sends run_program(code="...")
-  → MontyGateMcpServer receives the call
+  → MontygateMcpServer receives the call
     → ExecutionEngine parses and runs the code
       → Code calls tool("github.create_issue", title="Bug")
         → Bridge resolves "github.create_issue" in ToolRegistry
@@ -394,7 +391,7 @@ Commands:
 
 ## Security
 
-MontyGate is designed with defense-in-depth:
+Montygate applies multiple layers of protection:
 
 - **Sandboxed Execution** &mdash; Code runs in an isolated interpreter with no filesystem, network, or environment access
 - **Policy Engine** &mdash; Per-tool allow/deny/rate-limit rules evaluated before every call

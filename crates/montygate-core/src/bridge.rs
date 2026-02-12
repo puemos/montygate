@@ -2,7 +2,7 @@ use crate::engine::ToolDispatcher;
 use crate::policy::{PolicyDecision, PolicyEngine};
 use crate::registry::ToolRegistry;
 use crate::types::Result;
-use crate::MontyGateError;
+use crate::MontygateError;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Instant;
@@ -87,7 +87,7 @@ impl Bridge {
                         args.remove("name");
                         Ok((name.to_string(), serde_json::Value::Object(args)))
                     } else {
-                        Err(MontyGateError::Bridge(
+                        Err(MontygateError::Bridge(
                             "Tool call missing 'name' field".to_string(),
                         ))
                     }
@@ -96,7 +96,7 @@ impl Bridge {
                     if !arr.is_empty() {
                         let name = arr[0]
                             .as_str()
-                            .ok_or_else(|| MontyGateError::Bridge(
+                            .ok_or_else(|| MontygateError::Bridge(
                                 "First argument must be tool name string".to_string(),
                             ))?;
                         let args = if arr.len() >= 2 {
@@ -106,12 +106,12 @@ impl Bridge {
                         };
                         Ok((name.to_string(), args))
                     } else {
-                        Err(MontyGateError::Bridge(
+                        Err(MontygateError::Bridge(
                             "Tool call requires at least tool name".to_string(),
                         ))
                     }
                 } else {
-                    Err(MontyGateError::Bridge(
+                    Err(MontygateError::Bridge(
                         "Invalid tool call format".to_string(),
                     ))
                 }
@@ -124,7 +124,7 @@ impl Bridge {
                     let tool_name = format!("{}.{}", parts[0], parts[1]);
                     Ok((tool_name, arguments))
                 } else {
-                    Err(MontyGateError::Bridge(format!(
+                    Err(MontygateError::Bridge(format!(
                         "Unknown function: {}",
                         function_name
                     )))
@@ -154,7 +154,7 @@ impl ToolDispatcher for Bridge {
             }
             PolicyDecision::Deny { reason } => {
                 warn!("Tool '{}' denied by policy: {}", tool_name, reason);
-                return Err(MontyGateError::PolicyViolation(reason));
+                return Err(MontygateError::PolicyViolation(reason));
             }
             PolicyDecision::RequireApproval { tool, args: approval_args } => {
                 info!("Tool '{}' requires approval", tool);
@@ -166,14 +166,14 @@ impl ToolDispatcher for Bridge {
                             }
                             Ok(false) => {
                                 warn!("Tool '{}' approval denied", tool);
-                                return Err(MontyGateError::PolicyViolation(format!(
+                                return Err(MontygateError::PolicyViolation(format!(
                                     "Tool '{}' approval was denied",
                                     tool
                                 )));
                             }
                             Err(e) => {
                                 error!("Approval request for tool '{}' failed: {}", tool, e);
-                                return Err(MontyGateError::PolicyViolation(format!(
+                                return Err(MontygateError::PolicyViolation(format!(
                                     "Approval request failed for tool '{}': {}",
                                     tool, e
                                 )));
@@ -182,7 +182,7 @@ impl ToolDispatcher for Bridge {
                     }
                     None => {
                         warn!("Tool '{}' requires approval but no handler is configured", tool);
-                        return Err(MontyGateError::PolicyViolation(format!(
+                        return Err(MontygateError::PolicyViolation(format!(
                             "Tool '{}' requires approval but no approval handler is configured",
                             tool
                         )));
@@ -191,7 +191,7 @@ impl ToolDispatcher for Bridge {
             }
             PolicyDecision::RateLimitExceeded { tool, limit } => {
                 warn!("Rate limit exceeded for tool '{}': {}", tool, limit);
-                return Err(MontyGateError::RateLimitExceeded(format!(
+                return Err(MontygateError::RateLimitExceeded(format!(
                     "Rate limit exceeded: {}",
                     limit
                 )));
@@ -263,13 +263,13 @@ impl BridgeBuilder {
     pub fn build(self) -> Result<Bridge> {
         Ok(Bridge {
             registry: self.registry.ok_or_else(|| {
-                MontyGateError::Configuration("Registry is required".to_string())
+                MontygateError::Configuration("Registry is required".to_string())
             })?,
             policy: self.policy.ok_or_else(|| {
-                MontyGateError::Configuration("Policy engine is required".to_string())
+                MontygateError::Configuration("Policy engine is required".to_string())
             })?,
             client_pool: self.client_pool.ok_or_else(|| {
-                MontyGateError::Configuration("Client pool is required".to_string())
+                MontygateError::Configuration("Client pool is required".to_string())
             })?,
             approval_handler: self.approval_handler,
         })
@@ -334,14 +334,14 @@ impl McpClientPool for MockClientPool {
         self.responses
             .get(tool_name)
             .cloned()
-            .ok_or_else(|| MontyGateError::ToolNotFound(tool_name.to_string()))
+            .ok_or_else(|| MontygateError::ToolNotFound(tool_name.to_string()))
     }
 
     async fn list_server_tools(&self, server_name: &str) -> Result<Vec<crate::types::ToolDefinition>> {
         self.tools
             .get(server_name)
             .cloned()
-            .ok_or_else(|| MontyGateError::ServerNotFound(server_name.to_string()))
+            .ok_or_else(|| MontygateError::ServerNotFound(server_name.to_string()))
     }
 
     fn is_server_connected(&self, server_name: &str) -> bool {
@@ -427,7 +427,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::Configuration(_)
+            MontygateError::Configuration(_)
         ));
     }
 
@@ -441,7 +441,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::Configuration(_)
+            MontygateError::Configuration(_)
         ));
     }
 
@@ -455,7 +455,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::Configuration(_)
+            MontygateError::Configuration(_)
         ));
     }
 
@@ -499,7 +499,7 @@ mod tests {
 
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::ToolNotFound(_)
+            MontygateError::ToolNotFound(_)
         ));
     }
 
@@ -529,7 +529,7 @@ mod tests {
 
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::PolicyViolation(_)
+            MontygateError::PolicyViolation(_)
         ));
     }
 
@@ -559,7 +559,7 @@ mod tests {
 
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::PolicyViolation(_)
+            MontygateError::PolicyViolation(_)
         ));
     }
 
@@ -624,7 +624,7 @@ mod tests {
 
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::RateLimitExceeded(_)
+            MontygateError::RateLimitExceeded(_)
         ));
     }
 
@@ -721,7 +721,7 @@ mod tests {
             .unwrap();
 
         let result = bridge.parse_tool_call("tool", serde_json::json!({"title": "Test"}));
-        assert!(matches!(result.unwrap_err(), MontyGateError::Bridge(_)));
+        assert!(matches!(result.unwrap_err(), MontygateError::Bridge(_)));
     }
 
     #[test]
@@ -734,7 +734,7 @@ mod tests {
             .unwrap();
 
         let result = bridge.parse_tool_call("tool", serde_json::json!([]));
-        assert!(matches!(result.unwrap_err(), MontyGateError::Bridge(_)));
+        assert!(matches!(result.unwrap_err(), MontygateError::Bridge(_)));
     }
 
     #[test]
@@ -747,7 +747,7 @@ mod tests {
             .unwrap();
 
         let result = bridge.parse_tool_call("tool", serde_json::json!([123, {}]));
-        assert!(matches!(result.unwrap_err(), MontyGateError::Bridge(_)));
+        assert!(matches!(result.unwrap_err(), MontygateError::Bridge(_)));
     }
 
     #[test]
@@ -760,7 +760,7 @@ mod tests {
             .unwrap();
 
         let result = bridge.parse_tool_call("tool", serde_json::json!("just a string"));
-        assert!(matches!(result.unwrap_err(), MontyGateError::Bridge(_)));
+        assert!(matches!(result.unwrap_err(), MontygateError::Bridge(_)));
     }
 
     #[test]
@@ -791,7 +791,7 @@ mod tests {
             .unwrap();
 
         let result = bridge.parse_tool_call("nounderscorefunction", serde_json::json!({}));
-        assert!(matches!(result.unwrap_err(), MontyGateError::Bridge(_)));
+        assert!(matches!(result.unwrap_err(), MontygateError::Bridge(_)));
     }
 
     // === MockClientPool ===
@@ -822,7 +822,7 @@ mod tests {
             .await;
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::ToolNotFound(_)
+            MontygateError::ToolNotFound(_)
         ));
     }
 
@@ -846,7 +846,7 @@ mod tests {
         let result = pool.list_server_tools("missing").await;
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::ServerNotFound(_)
+            MontygateError::ServerNotFound(_)
         ));
     }
 

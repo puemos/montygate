@@ -6,7 +6,7 @@ use montygate_core::{
     engine::{EngineManager, ToolDispatcher},
     types::{PolicyAction, PolicyConfig, PolicyDefaults, PolicyRule, ResourceLimits, RunProgramInput},
 };
-use montygate_mcp::MontyGateMcpServer;
+use montygate_mcp::MontygateMcpServer;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -315,9 +315,9 @@ fn test_mcp_server_creation_with_tools() {
     let bridge = create_test_bridge(registry.clone(), allow_all_policy(), pool);
     let engine = EngineManager::with_mock(ResourceLimits::default());
 
-    let server = MontyGateMcpServer::new(engine.engine(), bridge, registry);
+    let server = MontygateMcpServer::new(engine.engine(), bridge, registry);
     let debug = format!("{:?}", server);
-    assert!(debug.contains("MontyGateMcpServer"));
+    assert!(debug.contains("MontygateMcpServer"));
 }
 
 // === call_tool escape hatch ===
@@ -344,7 +344,7 @@ fn test_config_serialization_roundtrip() {
     let path = write_test_config(&dir);
 
     let content = std::fs::read_to_string(&path).unwrap();
-    let config: montygate_core::MontyGateConfig = toml::from_str(&content).unwrap();
+    let config: montygate_core::MontygateConfig = toml::from_str(&content).unwrap();
     assert_eq!(config.server.name, "test-montygate");
     assert!(config.servers.is_empty());
 }
@@ -355,7 +355,7 @@ fn test_config_with_servers_roundtrip() {
     let path = write_config_with_servers(&dir);
 
     let content = std::fs::read_to_string(&path).unwrap();
-    let config: montygate_core::MontyGateConfig = toml::from_str(&content).unwrap();
+    let config: montygate_core::MontygateConfig = toml::from_str(&content).unwrap();
     assert_eq!(config.servers.len(), 1);
     assert_eq!(config.servers[0].name, "echo");
 }

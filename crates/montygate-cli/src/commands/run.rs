@@ -108,7 +108,7 @@ pub async fn run_server(
         }
     }
 
-    info!("MontyGate shutdown complete");
+    info!("Montygate shutdown complete");
     Ok(())
 }
 
@@ -121,7 +121,7 @@ async fn run_stdio_server(
     info!("Starting stdio transport");
 
     // Create the MCP server with the engine, dispatcher (bridge), and registry
-    let server = montygate_mcp::MontyGateMcpServer::new(
+    let server = montygate_mcp::MontygateMcpServer::new(
         engine.engine(),
         bridge,
         registry,
@@ -154,7 +154,7 @@ async fn run_http_server(
     let engine = engine.engine();
     let service = StreamableHttpService::new(
         move || {
-            Ok(montygate_mcp::MontyGateMcpServer::new(
+            Ok(montygate_mcp::MontygateMcpServer::new(
                 engine.clone(),
                 bridge.clone(),
                 registry.clone(),

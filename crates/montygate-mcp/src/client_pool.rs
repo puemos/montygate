@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use montygate_core::{
-    bridge::McpClientPool, MontyGateError, Result, ToolDefinition, TransportConfig,
+    bridge::McpClientPool, MontygateError, Result, ToolDefinition, TransportConfig,
 };
 use rmcp::{model::CallToolRequestParams, RoleClient, ServiceExt};
 use rmcp::service::RunningService;
@@ -46,14 +46,14 @@ impl ClientPool {
                 }
 
                 let transport = TokioChildProcess::new(cmd).map_err(|e| {
-                    MontyGateError::Mcp(format!(
+                    MontygateError::Mcp(format!(
                         "Failed to spawn process '{}': {}",
                         command, e
                     ))
                 })?;
 
                 ().serve(transport).await.map_err(|e| {
-                    MontyGateError::Mcp(format!(
+                    MontygateError::Mcp(format!(
                         "Failed to initialize MCP connection to '{}': {}",
                         name, e
                     ))
@@ -65,7 +65,7 @@ impl ClientPool {
                 let transport = StreamableHttpClientTransport::from_config(config);
 
                 ().serve(transport).await.map_err(|e| {
-                    MontyGateError::Mcp(format!(
+                    MontygateError::Mcp(format!(
                         "Failed to initialize MCP connection to '{}': {}",
                         name, e
                     ))
@@ -136,7 +136,7 @@ impl McpClientPool for ClientPool {
         let service = self
             .services
             .get(server_name)
-            .ok_or_else(|| MontyGateError::ServerNotFound(server_name.to_string()))?;
+            .ok_or_else(|| MontygateError::ServerNotFound(server_name.to_string()))?;
 
         let params = CallToolRequestParams {
             meta: None,
@@ -146,14 +146,14 @@ impl McpClientPool for ClientPool {
         };
 
         let result = service.call_tool(params).await.map_err(|e| {
-            MontyGateError::Mcp(format!(
+            MontygateError::Mcp(format!(
                 "Tool call '{}' on server '{}' failed: {}",
                 tool_name, server_name, e
             ))
         })?;
 
         // Convert CallToolResult to serde_json::Value
-        serde_json::to_value(&result).map_err(MontyGateError::from)
+        serde_json::to_value(&result).map_err(MontygateError::from)
     }
 
     async fn list_server_tools(&self, server_name: &str) -> Result<Vec<ToolDefinition>> {
@@ -162,10 +162,10 @@ impl McpClientPool for ClientPool {
         let service = self
             .services
             .get(server_name)
-            .ok_or_else(|| MontyGateError::ServerNotFound(server_name.to_string()))?;
+            .ok_or_else(|| MontygateError::ServerNotFound(server_name.to_string()))?;
 
         let tools = service.list_all_tools().await.map_err(|e| {
-            MontyGateError::Mcp(format!(
+            MontygateError::Mcp(format!(
                 "Failed to list tools from server '{}': {}",
                 server_name, e
             ))

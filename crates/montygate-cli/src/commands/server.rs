@@ -237,12 +237,12 @@ fn parse_env_vars(env: &[String]) -> Result<HashMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use montygate_core::types::MontyGateConfig;
+    use montygate_core::types::MontygateConfig;
     use tempfile::TempDir;
 
     fn setup_config(tmp: &TempDir) -> std::path::PathBuf {
         let path = tmp.path().join("config.toml");
-        let config = MontyGateConfig::default();
+        let config = MontygateConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         std::fs::write(&path, toml_str).unwrap();
         path

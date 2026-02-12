@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use montygate_core::types::MontyGateConfig;
+use montygate_core::types::MontygateConfig;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -30,7 +30,7 @@ pub fn ensure_config_dir(path: &Path) -> Result<()> {
 }
 
 /// Load configuration from file
-pub fn load_config(path: Option<PathBuf>) -> Result<MontyGateConfig> {
+pub fn load_config(path: Option<PathBuf>) -> Result<MontygateConfig> {
     let path = get_config_path(path)?;
     
     if !path.exists() {
@@ -41,14 +41,14 @@ pub fn load_config(path: Option<PathBuf>) -> Result<MontyGateConfig> {
     let contents = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read config file: {:?}", path))?;
     
-    let config: MontyGateConfig = toml::from_str(&contents)
+    let config: MontygateConfig = toml::from_str(&contents)
         .with_context(|| format!("Failed to parse config file: {:?}", path))?;
     
     Ok(config)
 }
 
 /// Save configuration to file
-pub async fn save_config(config: &MontyGateConfig, path: &Path) -> Result<()> {
+pub async fn save_config(config: &MontygateConfig, path: &Path) -> Result<()> {
     ensure_config_dir(path)?;
     
     let toml_str = toml::to_string_pretty(config)
@@ -70,7 +70,7 @@ pub fn config_exists(path: Option<PathBuf>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use montygate_core::types::MontyGateConfig;
+    use montygate_core::types::MontygateConfig;
     use tempfile::TempDir;
 
     #[test]
@@ -119,7 +119,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
 
-        let config = MontyGateConfig::default();
+        let config = MontygateConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         std::fs::write(&path, toml_str).unwrap();
 
@@ -142,7 +142,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("saved.toml");
 
-        let config = MontyGateConfig::default();
+        let config = MontygateConfig::default();
         save_config(&config, &path).await.unwrap();
 
         assert!(path.exists());
@@ -155,7 +155,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("roundtrip.toml");
 
-        let config = MontyGateConfig {
+        let config = MontygateConfig {
             server: montygate_core::types::ServerInfo {
                 name: "test_server".to_string(),
                 version: "2.0.0".to_string(),

@@ -1,6 +1,6 @@
 # Python Subset Support (Monty v0.0.4)
 
-MontyGate executes Python code using the [Monty interpreter](https://github.com/pydantic/monty), a sandboxed Python implementation written in Rust. This document describes what Python features are available.
+Montygate executes Python code using the [Monty interpreter](https://github.com/pydantic/monty), a sandboxed Python implementation written in Rust. This document describes what Python features are available.
 
 ## Supported
 
@@ -74,7 +74,7 @@ The primary way to interact with external services is the `tool()` function:
 result = tool("server.tool_name", arg1=val1, arg2=val2)
 ```
 
-This calls a downstream MCP tool through MontyGate's bridge, which handles:
+This calls a downstream MCP tool through Montygate's bridge, which handles:
 - Tool resolution in the registry
 - Policy enforcement (allow/deny/rate-limit)
 - Dispatch to the downstream MCP server

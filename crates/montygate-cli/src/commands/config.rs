@@ -1,6 +1,6 @@
 use crate::config::{get_config_path, load_config, save_config, ensure_config_dir};
 use anyhow::{Context, Result, bail};
-use montygate_core::types::MontyGateConfig;
+use montygate_core::types::MontygateConfig;
 use tracing::info;
 
 pub async fn init_config(
@@ -22,7 +22,7 @@ pub async fn init_config(
     ensure_config_dir(&path)?;
 
     // Create default config
-    let config = MontyGateConfig {
+    let config = MontygateConfig {
         server: montygate_core::types::ServerInfo {
             name: name.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -215,7 +215,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
 
-        let config = montygate_core::MontyGateConfig {
+        let config = montygate_core::MontygateConfig {
             server: montygate_core::types::ServerInfo {
                 name: "test".to_string(),
                 version: "1.0.0".to_string(),

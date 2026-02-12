@@ -1,6 +1,6 @@
 use crate::registry::ToolRoute;
 use crate::types::{PolicyAction, PolicyConfig, Result};
-use crate::MontyGateError;
+use crate::MontygateError;
 use dashmap::DashMap;
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
@@ -131,7 +131,7 @@ impl PolicyEngine {
         for entry in self.rate_limits.iter() {
             if matches_pattern(entry.key(), tool_name) {
                 if let Err(_e) = entry.limiter.check() {
-                    return Err(MontyGateError::RateLimitExceeded(format!(
+                    return Err(MontygateError::RateLimitExceeded(format!(
                         "Rate limit exceeded for pattern '{}'",
                         entry.key()
                     )));
@@ -226,7 +226,7 @@ fn matches_pattern(pattern: &str, tool_name: &str) -> bool {
 fn parse_rate_limit(limit_str: &str) -> Result<RateLimiter<NotKeyed, InMemoryState, DefaultClock>> {
     let parts: Vec<&str> = limit_str.split('/').collect();
     if parts.len() != 2 {
-        return Err(MontyGateError::Configuration(format!(
+        return Err(MontygateError::Configuration(format!(
             "Invalid rate limit format: {}",
             limit_str
         )));
@@ -234,7 +234,7 @@ fn parse_rate_limit(limit_str: &str) -> Result<RateLimiter<NotKeyed, InMemorySta
 
     let count: u32 = parts[0]
         .parse()
-        .map_err(|_| MontyGateError::Configuration(format!("Invalid rate limit count: {}", parts[0])))?;
+        .map_err(|_| MontygateError::Configuration(format!("Invalid rate limit count: {}", parts[0])))?;
 
     let duration = match parts[1] {
         "sec" | "second" | "s" => Duration::from_secs(1),
@@ -242,7 +242,7 @@ fn parse_rate_limit(limit_str: &str) -> Result<RateLimiter<NotKeyed, InMemorySta
         "hour" | "h" => Duration::from_secs(3600),
         "day" | "d" => Duration::from_secs(86400),
         _ => {
-            return Err(MontyGateError::Configuration(format!(
+            return Err(MontygateError::Configuration(format!(
                 "Invalid rate limit duration: {}",
                 parts[1]
             )))
@@ -250,7 +250,7 @@ fn parse_rate_limit(limit_str: &str) -> Result<RateLimiter<NotKeyed, InMemorySta
     };
 
     let quota = Quota::with_period(duration)
-        .ok_or_else(|| MontyGateError::Configuration("Invalid quota period".to_string()))?
+        .ok_or_else(|| MontygateError::Configuration("Invalid quota period".to_string()))?
         .allow_burst(NonZeroU32::new(count).unwrap_or(NonZeroU32::new(1).unwrap()));
 
     Ok(RateLimiter::direct(quota))

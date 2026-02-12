@@ -1,5 +1,5 @@
 use montygate_core::{
-    ExecutionEngine, ExecutionResult, MontyGateError, RunProgramInput, ToolDispatcher,
+    ExecutionEngine, ExecutionResult, MontygateError, RunProgramInput, ToolDispatcher,
     ToolRegistry,
 };
 use std::sync::Arc;
@@ -89,19 +89,19 @@ pub struct ExecutionStats {
     pub external_calls: usize,
 }
 
-/// MontyGate MCP Server that exposes the run_program tool
+/// Montygate MCP Server that exposes the run_program tool
 ///
 /// This is the upstream MCP server that MCP clients (like Claude Desktop) connect to.
 /// It provides a single tool: `run_program` that executes Monty code.
 #[derive(Clone, Debug)]
-pub struct MontyGateMcpServer {
+pub struct MontygateMcpServer {
     engine: Arc<dyn ExecutionEngine>,
     dispatcher: Arc<dyn ToolDispatcher>,
     registry: Arc<ToolRegistry>,
     tool_router: ToolRouter<Self>,
 }
 
-impl MontyGateMcpServer {
+impl MontygateMcpServer {
     /// Create a new MCP server with the given engine, dispatcher, and registry
     pub fn new(
         engine: Arc<dyn ExecutionEngine>,
@@ -121,7 +121,7 @@ impl MontyGateMcpServer {
     /// This method sets up the MCP server with stdio transport and runs it,
     /// waiting for connections from MCP clients.
     pub async fn run_stdio(self) -> anyhow::Result<()> {
-        info!("Starting MontyGate MCP server with stdio transport");
+        info!("Starting Montygate MCP server with stdio transport");
 
         let service = self.serve(stdio()).await.map_err(|e| {
             anyhow::anyhow!("Failed to start MCP server: {}", e)
@@ -206,7 +206,7 @@ impl MontyGateMcpServer {
 
 // This impl block with tools generates the Self::tool_router() method
 #[tool_router]
-impl MontyGateMcpServer {
+impl MontygateMcpServer {
     /// Execute Python code in a sandboxed interpreter
     ///
     /// The code can call tools via the `tool()` function:
@@ -257,16 +257,16 @@ impl MontyGateMcpServer {
 }
 
 // Additional impl block for helper methods
-impl MontyGateMcpServer {
+impl MontygateMcpServer {
     /// Execute the program using the engine
-    async fn execute_program(&self, input: RunProgramInput) -> std::result::Result<ExecutionResult, MontyGateError> {
+    async fn execute_program(&self, input: RunProgramInput) -> std::result::Result<ExecutionResult, MontygateError> {
         self.engine.execute(input, self.dispatcher.clone()).await
     }
 }
 
 // Manual ServerHandler implementation (instead of #[tool_handler])
 // so we can dynamically modify the run_program tool description
-impl ServerHandler for MontyGateMcpServer {
+impl ServerHandler for MontygateMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
@@ -275,7 +275,7 @@ impl ServerHandler for MontyGateMcpServer {
                 .build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
-                "MontyGate MCP Server: Execute Python code with access to downstream MCP tools. \
+                "Montygate MCP Server: Execute Python code with access to downstream MCP tools. \
                 Use run_program to execute code. Tools from connected servers can be called via \
                 the tool() function.".to_string()
             ),
@@ -378,14 +378,14 @@ mod tests {
     use super::*;
     use montygate_core::{MockEngine, SimpleDispatcher, ToolCall, ToolDefinition};
 
-    fn create_test_server() -> MontyGateMcpServer {
+    fn create_test_server() -> MontygateMcpServer {
         let engine = Arc::new(MockEngine::default());
         let dispatcher = Arc::new(SimpleDispatcher::new());
         let registry = Arc::new(ToolRegistry::new());
-        MontyGateMcpServer::new(engine, dispatcher, registry)
+        MontygateMcpServer::new(engine, dispatcher, registry)
     }
 
-    fn create_test_server_with_tools() -> MontyGateMcpServer {
+    fn create_test_server_with_tools() -> MontygateMcpServer {
         let engine = Arc::new(MockEngine::default());
         let dispatcher = Arc::new(SimpleDispatcher::new());
         let registry = Arc::new(ToolRegistry::new());
@@ -415,16 +415,16 @@ mod tests {
             )
             .unwrap();
 
-        MontyGateMcpServer::new(engine, dispatcher, registry)
+        MontygateMcpServer::new(engine, dispatcher, registry)
     }
 
-    // === MontyGateMcpServer ===
+    // === MontygateMcpServer ===
 
     #[test]
     fn test_server_creation() {
         let server = create_test_server();
         let debug = format!("{:?}", server);
-        assert!(debug.contains("MontyGateMcpServer"));
+        assert!(debug.contains("MontygateMcpServer"));
     }
 
     #[test]

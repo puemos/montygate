@@ -1,5 +1,5 @@
 use crate::types::{ExecutionResult, ResourceLimits, Result, RunProgramInput, ToolCall};
-use crate::MontyGateError;
+use crate::MontygateError;
 use monty::{
     CollectStringPrint, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject,
     MontyRun, RunProgress,
@@ -94,7 +94,7 @@ impl ExecutionEngine for MockEngine {
 
         // Validate code length
         if input.code.len() > self.limits.max_code_length {
-            return Err(MontyGateError::ResourceLimitExceeded(format!(
+            return Err(MontygateError::ResourceLimitExceeded(format!(
                 "Code exceeds maximum length of {} characters",
                 self.limits.max_code_length
             )));
@@ -107,7 +107,7 @@ impl ExecutionEngine for MockEngine {
 
         // Check external call limit
         if tool_calls.len() > self.limits.max_external_calls {
-            return Err(MontyGateError::ResourceLimitExceeded(format!(
+            return Err(MontygateError::ResourceLimitExceeded(format!(
                 "Too many external calls: {} (max: {})",
                 tool_calls.len(),
                 self.limits.max_external_calls
@@ -195,7 +195,7 @@ impl ExecutionEngine for MockEngine {
                 }
 
                 if paren_depth < 0 || brace_depth < 0 || bracket_depth < 0 {
-                    return Err(MontyGateError::Parse(format!(
+                    return Err(MontygateError::Parse(format!(
                         "Unbalanced brackets at line {}",
                         line_num + 1
                     )));
@@ -204,7 +204,7 @@ impl ExecutionEngine for MockEngine {
         }
 
         if paren_depth != 0 || brace_depth != 0 || bracket_depth != 0 {
-            return Err(MontyGateError::Parse(
+            return Err(MontygateError::Parse(
                 "Unbalanced brackets in code".to_string(),
             ));
         }
@@ -304,7 +304,7 @@ impl ExecutionEngine for MontyEngine {
 
         // Validate code length
         if input.code.len() > self.limits.max_code_length {
-            return Err(MontyGateError::ResourceLimitExceeded(format!(
+            return Err(MontygateError::ResourceLimitExceeded(format!(
                 "Code exceeds maximum length of {} characters",
                 self.limits.max_code_length
             )));
@@ -370,7 +370,7 @@ impl ExecutionEngine for MontyEngine {
 
         // Wait for the Monty thread to complete
         let monty_result = monty_handle.await.map_err(|e| {
-            MontyGateError::Execution(format!("Monty execution thread panicked: {}", e))
+            MontygateError::Execution(format!("Monty execution thread panicked: {}", e))
         })?;
 
         let total_duration = start.elapsed().as_millis() as u64;
@@ -439,7 +439,7 @@ impl ExecutionEngine for MontyEngine {
                 }
 
                 if paren_depth < 0 || brace_depth < 0 || bracket_depth < 0 {
-                    return Err(MontyGateError::Parse(format!(
+                    return Err(MontygateError::Parse(format!(
                         "Unbalanced brackets at line {}",
                         line_num + 1
                     )));
@@ -448,7 +448,7 @@ impl ExecutionEngine for MontyEngine {
         }
 
         if paren_depth != 0 || brace_depth != 0 || bracket_depth != 0 {
-            return Err(MontyGateError::Parse(
+            return Err(MontygateError::Parse(
                 "Unbalanced brackets in code".to_string(),
             ));
         }
@@ -735,7 +735,7 @@ impl ToolDispatcher for SimpleDispatcher {
         if let Some(callback) = self.callbacks.get(tool_name) {
             callback(args)
         } else {
-            Err(MontyGateError::ToolNotFound(tool_name.to_string()))
+            Err(MontygateError::ToolNotFound(tool_name.to_string()))
         }
     }
 }
@@ -958,7 +958,7 @@ mod tests {
         let result = engine.execute(input, Arc::new(dispatcher)).await;
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::ResourceLimitExceeded(_)
+            MontygateError::ResourceLimitExceeded(_)
         ));
     }
 
@@ -985,7 +985,7 @@ mod tests {
         let result = engine.execute(input, Arc::new(dispatcher)).await;
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::ResourceLimitExceeded(_)
+            MontygateError::ResourceLimitExceeded(_)
         ));
     }
 
@@ -1100,7 +1100,7 @@ mod tests {
             .await;
         assert!(matches!(
             result.unwrap_err(),
-            MontyGateError::ToolNotFound(_)
+            MontygateError::ToolNotFound(_)
         ));
     }
 

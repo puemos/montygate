@@ -132,9 +132,9 @@ impl Default for ResourceLimits {
     }
 }
 
-/// Error types for MontyGate
+/// Error types for Montygate
 #[derive(Error, Debug)]
-pub enum MontyGateError {
+pub enum MontygateError {
     #[error("Execution error: {0}")]
     Execution(String),
 
@@ -181,7 +181,7 @@ pub enum MontyGateError {
     Snapshot(String),
 }
 
-pub type Result<T> = std::result::Result<T, MontyGateError>;
+pub type Result<T> = std::result::Result<T, MontygateError>;
 
 /// Tool definition as received from downstream MCP server
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,9 +260,9 @@ impl TransportConfig {
     }
 }
 
-/// Configuration for the MontyGate server
+/// Configuration for the Montygate server
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MontyGateConfig {
+pub struct MontygateConfig {
     pub server: ServerInfo,
     #[serde(default)]
     pub servers: Vec<ServerConfig>,
@@ -559,60 +559,60 @@ mod tests {
         assert_eq!(deserialized.max_execution_time_ms, 30_000);
     }
 
-    // === MontyGateError ===
+    // === MontygateError ===
 
     #[test]
     fn test_error_display_messages() {
         assert_eq!(
-            MontyGateError::Execution("fail".into()).to_string(),
+            MontygateError::Execution("fail".into()).to_string(),
             "Execution error: fail"
         );
         assert_eq!(
-            MontyGateError::ToolNotFound("x".into()).to_string(),
+            MontygateError::ToolNotFound("x".into()).to_string(),
             "Tool not found: x"
         );
         assert_eq!(
-            MontyGateError::ServerNotFound("s".into()).to_string(),
+            MontygateError::ServerNotFound("s".into()).to_string(),
             "Server not found: s"
         );
         assert_eq!(
-            MontyGateError::PolicyViolation("denied".into()).to_string(),
+            MontygateError::PolicyViolation("denied".into()).to_string(),
             "Policy violation: denied"
         );
         assert_eq!(
-            MontyGateError::RateLimitExceeded("10/min".into()).to_string(),
+            MontygateError::RateLimitExceeded("10/min".into()).to_string(),
             "Rate limit exceeded: 10/min"
         );
         assert_eq!(
-            MontyGateError::ResourceLimitExceeded("mem".into()).to_string(),
+            MontygateError::ResourceLimitExceeded("mem".into()).to_string(),
             "Resource limit exceeded: mem"
         );
         assert_eq!(
-            MontyGateError::TypeCheck("bad type".into()).to_string(),
+            MontygateError::TypeCheck("bad type".into()).to_string(),
             "Type check error: bad type"
         );
         assert_eq!(
-            MontyGateError::Parse("syntax".into()).to_string(),
+            MontygateError::Parse("syntax".into()).to_string(),
             "Parse error: syntax"
         );
         assert_eq!(
-            MontyGateError::Configuration("missing".into()).to_string(),
+            MontygateError::Configuration("missing".into()).to_string(),
             "Configuration error: missing"
         );
         assert_eq!(
-            MontyGateError::Mcp("proto".into()).to_string(),
+            MontygateError::Mcp("proto".into()).to_string(),
             "MCP error: proto"
         );
         assert_eq!(
-            MontyGateError::Bridge("dispatch".into()).to_string(),
+            MontygateError::Bridge("dispatch".into()).to_string(),
             "Bridge error: dispatch"
         );
         assert_eq!(
-            MontyGateError::Interrupted.to_string(),
+            MontygateError::Interrupted.to_string(),
             "External call interrupted"
         );
         assert_eq!(
-            MontyGateError::Snapshot("corrupt".into()).to_string(),
+            MontygateError::Snapshot("corrupt".into()).to_string(),
             "Snapshot error: corrupt"
         );
     }
@@ -620,14 +620,14 @@ mod tests {
     #[test]
     fn test_error_from_io() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let err: MontyGateError = io_err.into();
+        let err: MontygateError = io_err.into();
         assert!(err.to_string().contains("file not found"));
     }
 
     #[test]
     fn test_error_from_serde_json() {
         let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
-        let err: MontyGateError = json_err.into();
+        let err: MontygateError = json_err.into();
         assert!(err.to_string().contains("Serialization error"));
     }
 
@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn test_montygate_config_default() {
-        let config = MontyGateConfig::default();
+        let config = MontygateConfig::default();
         assert_eq!(config.server.name, "montygate");
         assert_eq!(config.server.version, "0.1.0");
         assert!(config.servers.is_empty());
@@ -884,11 +884,11 @@ mod tests {
         assert_eq!(deserialized.transport.command(), Some(&"npx".to_string()));
     }
 
-    // === MontyGateConfig full round-trip ===
+    // === MontygateConfig full round-trip ===
 
     #[test]
     fn test_montygate_config_serialization() {
-        let config = MontyGateConfig {
+        let config = MontygateConfig {
             server: ServerInfo {
                 name: "test".to_string(),
                 version: "1.0.0".to_string(),
@@ -903,7 +903,7 @@ mod tests {
             policy: PolicyConfig::default(),
         };
         let json = serde_json::to_string(&config).unwrap();
-        let deserialized: MontyGateConfig = serde_json::from_str(&json).unwrap();
+        let deserialized: MontygateConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.server.name, "test");
         assert_eq!(deserialized.servers.len(), 1);
     }

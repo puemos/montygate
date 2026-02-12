@@ -1,5 +1,5 @@
 use montygate_core::{
-    ExecutionEngine, ExecutionResult, MontyGateError, Result, RunProgramInput,
+    ExecutionEngine, ExecutionResult, MontygateError, Result, RunProgramInput,
     ToolDispatcher,
 };
 use std::sync::Arc;
@@ -8,21 +8,21 @@ use tracing::{debug, info, instrument};
 /// Server handler for the upstream MCP server
 /// 
 /// This is what MCP clients (like Claude Desktop) connect to
-pub struct MontyGateServerHandler {
+pub struct MontygateServerHandler {
     engine: Arc<dyn ExecutionEngine>,
     dispatcher: Arc<dyn ToolDispatcher>,
 }
 
-impl std::fmt::Debug for MontyGateServerHandler {
+impl std::fmt::Debug for MontygateServerHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MontyGateServerHandler")
+        f.debug_struct("MontygateServerHandler")
             .field("engine", &"<dyn ExecutionEngine>")
             .field("dispatcher", &"<dyn ToolDispatcher>")
             .finish()
     }
 }
 
-impl MontyGateServerHandler {
+impl MontygateServerHandler {
     pub fn new(
         engine: Arc<dyn ExecutionEngine>,
         dispatcher: Arc<dyn ToolDispatcher>,
@@ -82,7 +82,7 @@ pub enum McpTransport {
     StreamableHttp { host: String, port: u16 },
 }
 
-/// Builder for creating the MontyGate MCP server
+/// Builder for creating the Montygate MCP server
 #[derive(Default)]
 pub struct McpServerBuilder {
     transport: Option<McpTransport>,
@@ -120,13 +120,13 @@ impl McpServerBuilder {
         self
     }
 
-    pub fn build(self) -> Result<MontyGateServerHandler> {
-        Ok(MontyGateServerHandler::new(
+    pub fn build(self) -> Result<MontygateServerHandler> {
+        Ok(MontygateServerHandler::new(
             self.engine.ok_or_else(|| {
-                MontyGateError::Configuration("Engine is required".to_string())
+                MontygateError::Configuration("Engine is required".to_string())
             })?,
             self.dispatcher.ok_or_else(|| {
-                MontyGateError::Configuration("Dispatcher is required".to_string())
+                MontygateError::Configuration("Dispatcher is required".to_string())
             })?,
         ))
     }
@@ -138,13 +138,13 @@ mod tests {
     use montygate_core::{MockEngine, SimpleDispatcher};
     use std::collections::HashMap;
 
-    // === MontyGateServerHandler ===
+    // === MontygateServerHandler ===
 
     #[tokio::test]
     async fn test_server_handler_run_program() {
         let engine = Arc::new(MockEngine::default());
         let dispatcher = Arc::new(SimpleDispatcher::new());
-        let handler = MontyGateServerHandler::new(engine, dispatcher);
+        let handler = MontygateServerHandler::new(engine, dispatcher);
 
         let input = RunProgramInput {
             code: "# Simple test".to_string(),
@@ -163,7 +163,7 @@ mod tests {
         let engine = Arc::new(MockEngine::default());
         let mut dispatcher = SimpleDispatcher::new();
         dispatcher.register("test.echo", |args| Ok(args));
-        let handler = MontyGateServerHandler::new(engine, Arc::new(dispatcher));
+        let handler = MontygateServerHandler::new(engine, Arc::new(dispatcher));
 
         let input = RunProgramInput {
             code: "# TOOL: test.echo {\"msg\": \"hi\"}".to_string(),
@@ -179,7 +179,7 @@ mod tests {
     async fn test_server_handler_type_check_disabled() {
         let engine = Arc::new(MockEngine::default());
         let dispatcher = Arc::new(SimpleDispatcher::new());
-        let handler = MontyGateServerHandler::new(engine, dispatcher);
+        let handler = MontygateServerHandler::new(engine, dispatcher);
 
         // This code has unbalanced parens but type_check is false
         let input = RunProgramInput {
@@ -196,7 +196,7 @@ mod tests {
     async fn test_server_handler_type_check_failure() {
         let engine = Arc::new(MockEngine::default());
         let dispatcher = Arc::new(SimpleDispatcher::new());
-        let handler = MontyGateServerHandler::new(engine, dispatcher);
+        let handler = MontygateServerHandler::new(engine, dispatcher);
 
         let input = RunProgramInput {
             code: "def test(:".to_string(),
@@ -212,7 +212,7 @@ mod tests {
     fn test_generate_description() {
         let engine = Arc::new(MockEngine::default());
         let dispatcher = Arc::new(SimpleDispatcher::new());
-        let handler = MontyGateServerHandler::new(engine, dispatcher);
+        let handler = MontygateServerHandler::new(engine, dispatcher);
 
         let catalog = "- github.create_issue\n- slack.post_message";
         let desc = handler.generate_run_program_description(catalog);
@@ -228,7 +228,7 @@ mod tests {
     fn test_generate_description_empty_catalog() {
         let engine = Arc::new(MockEngine::default());
         let dispatcher = Arc::new(SimpleDispatcher::new());
-        let handler = MontyGateServerHandler::new(engine, dispatcher);
+        let handler = MontygateServerHandler::new(engine, dispatcher);
 
         let desc = handler.generate_run_program_description("");
         assert!(desc.contains("run_program"));
@@ -238,9 +238,9 @@ mod tests {
     fn test_server_handler_debug() {
         let engine = Arc::new(MockEngine::default());
         let dispatcher = Arc::new(SimpleDispatcher::new());
-        let handler = MontyGateServerHandler::new(engine, dispatcher);
+        let handler = MontygateServerHandler::new(engine, dispatcher);
         let debug = format!("{:?}", handler);
-        assert!(debug.contains("MontyGateServerHandler"));
+        assert!(debug.contains("MontygateServerHandler"));
     }
 
     // === McpTransport ===

@@ -1,5 +1,5 @@
 use crate::types::{Result, ToolDefinition};
-use crate::MontyGateError;
+use crate::MontygateError;
 use dashmap::DashMap;
 use regex::Regex;
 use std::sync::Arc;
@@ -106,7 +106,7 @@ impl ToolRegistry {
         self.routes
             .get(tool_name)
             .map(|entry| entry.clone())
-            .ok_or_else(|| MontyGateError::ToolNotFound(tool_name.to_string()))
+            .ok_or_else(|| MontygateError::ToolNotFound(tool_name.to_string()))
     }
 
     /// Check if a tool exists in the registry
@@ -425,7 +425,7 @@ mod tests {
     fn test_tool_not_found() {
         let registry = ToolRegistry::new();
         let result = registry.resolve("nonexistent.tool");
-        assert!(matches!(result, Err(MontyGateError::ToolNotFound(_))));
+        assert!(matches!(result, Err(MontygateError::ToolNotFound(_))));
     }
 
     #[test]

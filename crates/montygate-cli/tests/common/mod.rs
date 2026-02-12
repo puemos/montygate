@@ -3,7 +3,7 @@ use montygate_core::{
     policy::PolicyEngine,
     registry::ToolRegistry,
     types::{
-        MontyGateConfig, PolicyAction, PolicyConfig, PolicyDefaults,
+        MontygateConfig, PolicyAction, PolicyConfig, PolicyDefaults,
         ResourceLimits, ServerConfig, ServerInfo, ToolDefinition, TransportConfig,
     },
 };
@@ -122,7 +122,7 @@ pub fn allow_all_policy() -> PolicyConfig {
 
 /// Write a minimal valid config file and return its path
 pub fn write_test_config(dir: &tempfile::TempDir) -> std::path::PathBuf {
-    let config = MontyGateConfig {
+    let config = MontygateConfig {
         server: ServerInfo {
             name: "test-montygate".to_string(),
             version: "0.1.0".to_string(),
@@ -140,7 +140,7 @@ pub fn write_test_config(dir: &tempfile::TempDir) -> std::path::PathBuf {
 
 /// Write a config with servers for downstream connection testing
 pub fn write_config_with_servers(dir: &tempfile::TempDir) -> std::path::PathBuf {
-    let config = MontyGateConfig {
+    let config = MontygateConfig {
         server: ServerInfo {
             name: "test-montygate".to_string(),
             version: "0.1.0".to_string(),

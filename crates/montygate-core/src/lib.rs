@@ -1,6 +1,6 @@
-//! MontyGate Core Library
+//! Montygate Core Library
 //!
-//! This crate provides the core functionality for MontyGate:
+//! This crate provides the core functionality for Montygate:
 //! - Tool registry for managing downstream MCP servers
 //! - Policy engine for access control
 //! - Execution engine for running Monty programs
@@ -20,7 +20,7 @@ pub use policy::{PolicyDecision, PolicyEngine};
 pub use registry::{ToolId, ToolRegistry, ToolRoute};
 pub use types::{
     ExecutionResult, ExecutionSnapshot, ExecutionState, ExecutionStats, ExternalCall,
-    MontyGateConfig, MontyGateError, PolicyAction, PolicyConfig, PolicyRule, ResourceLimits,
+    MontygateConfig, MontygateError, PolicyAction, PolicyConfig, PolicyRule, ResourceLimits,
     Result, RunProgramInput, ServerConfig, ToolCall, ToolCallId, ToolDefinition, TransportConfig,
 };
 
