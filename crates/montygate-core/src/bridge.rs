@@ -8,6 +8,28 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
+/// Handler for tool calls requiring manual approval.
+///
+/// When the policy engine returns `RequireApproval`, the bridge delegates
+/// to this handler. If no handler is configured, approval requests are denied.
+#[async_trait]
+pub trait ApprovalHandler: Send + Sync + std::fmt::Debug {
+    /// Request approval for a tool call. Returns `true` to allow, `false` to deny.
+    async fn request_approval(&self, tool: &str, args: &serde_json::Value) -> Result<bool>;
+}
+
+/// Auto-approves all tool calls. Useful for testing and non-interactive environments.
+#[derive(Debug, Clone, Default)]
+pub struct AutoApproveHandler;
+
+#[async_trait]
+impl ApprovalHandler for AutoApproveHandler {
+    async fn request_approval(&self, tool: &str, _args: &serde_json::Value) -> Result<bool> {
+        info!("Auto-approving tool call: {}", tool);
+        Ok(true)
+    }
+}
+
 /// Bridge between Monty execution and MCP tool calls
 ///
 /// The Bridge is responsible for:
@@ -20,6 +42,7 @@ pub struct Bridge {
     registry: Arc<ToolRegistry>,
     policy: Arc<PolicyEngine>,
     client_pool: Arc<dyn McpClientPool>,
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
 
 impl Bridge {
@@ -32,6 +55,7 @@ impl Bridge {
             registry,
             policy,
             client_pool,
+            approval_handler: None,
         }
     }
 
@@ -132,14 +156,38 @@ impl ToolDispatcher for Bridge {
                 warn!("Tool '{}' denied by policy: {}", tool_name, reason);
                 return Err(MontyGateError::PolicyViolation(reason));
             }
-            PolicyDecision::RequireApproval { tool, args } => {
+            PolicyDecision::RequireApproval { tool, args: approval_args } => {
                 info!("Tool '{}' requires approval", tool);
-                // For now, we return an error indicating approval is needed
-                // In the future, this would pause execution and wait for approval
-                return Err(MontyGateError::PolicyViolation(format!(
-                    "Tool '{}' requires manual approval. Args: {}",
-                    tool, args
-                )));
+                match &self.approval_handler {
+                    Some(handler) => {
+                        match handler.request_approval(&tool, &approval_args).await {
+                            Ok(true) => {
+                                info!("Tool '{}' approved", tool);
+                            }
+                            Ok(false) => {
+                                warn!("Tool '{}' approval denied", tool);
+                                return Err(MontyGateError::PolicyViolation(format!(
+                                    "Tool '{}' approval was denied",
+                                    tool
+                                )));
+                            }
+                            Err(e) => {
+                                error!("Approval request for tool '{}' failed: {}", tool, e);
+                                return Err(MontyGateError::PolicyViolation(format!(
+                                    "Approval request failed for tool '{}': {}",
+                                    tool, e
+                                )));
+                            }
+                        }
+                    }
+                    None => {
+                        warn!("Tool '{}' requires approval but no handler is configured", tool);
+                        return Err(MontyGateError::PolicyViolation(format!(
+                            "Tool '{}' requires approval but no approval handler is configured",
+                            tool
+                        )));
+                    }
+                }
             }
             PolicyDecision::RateLimitExceeded { tool, limit } => {
                 warn!("Rate limit exceeded for tool '{}': {}", tool, limit);
@@ -184,6 +232,7 @@ pub struct BridgeBuilder {
     registry: Option<Arc<ToolRegistry>>,
     policy: Option<Arc<PolicyEngine>>,
     client_pool: Option<Arc<dyn McpClientPool>>,
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
 
 impl BridgeBuilder {
@@ -206,6 +255,11 @@ impl BridgeBuilder {
         self
     }
 
+    pub fn approval_handler(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
+        self.approval_handler = Some(handler);
+        self
+    }
+
     pub fn build(self) -> Result<Bridge> {
         Ok(Bridge {
             registry: self.registry.ok_or_else(|| {
@@ -217,6 +271,7 @@ impl BridgeBuilder {
             client_pool: self.client_pool.ok_or_else(|| {
                 MontyGateError::Configuration("Client pool is required".to_string())
             })?,
+            approval_handler: self.approval_handler,
         })
     }
 }
@@ -479,7 +534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bridge_dispatch_policy_require_approval() {
+    async fn test_bridge_dispatch_policy_require_approval_no_handler() {
         let policy = Arc::new(PolicyEngine::new(PolicyConfig {
             defaults: PolicyDefaults {
                 action: PolicyAction::Allow,
@@ -506,6 +561,35 @@ mod tests {
             result.unwrap_err(),
             MontyGateError::PolicyViolation(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_bridge_dispatch_policy_require_approval_with_auto_approve() {
+        let policy = Arc::new(PolicyEngine::new(PolicyConfig {
+            defaults: PolicyDefaults {
+                action: PolicyAction::Allow,
+            },
+            rules: vec![PolicyRule {
+                match_pattern: "github.create_issue".to_string(),
+                action: PolicyAction::RequireApproval,
+                rate_limit: None,
+            }],
+        }));
+
+        let bridge = Bridge::builder()
+            .registry(create_test_registry())
+            .policy(policy)
+            .client_pool(create_test_client_pool())
+            .approval_handler(Arc::new(AutoApproveHandler))
+            .build()
+            .unwrap();
+
+        let result = bridge
+            .dispatch("github.create_issue", serde_json::json!({}))
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), serde_json::json!({"id": 123}));
     }
 
     #[tokio::test]

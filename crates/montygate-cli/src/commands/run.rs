@@ -100,11 +100,8 @@ pub async fn run_server(
         "stdio" => {
             run_stdio_server(engine, Arc::new(bridge), registry.clone()).await?;
         }
-        "sse" => {
-            run_sse_server(&host, port, engine, Arc::new(bridge)).await?;
-        }
-        "http" => {
-            run_http_server(&host, port, engine, Arc::new(bridge)).await?;
+        "sse" | "http" => {
+            run_http_server(&host, port, engine, Arc::new(bridge), registry.clone()).await?;
         }
         _ => {
             anyhow::bail!("Unknown transport: {}", transport);
@@ -136,46 +133,58 @@ async fn run_stdio_server(
     Ok(())
 }
 
-/// Run the MCP server with SSE transport
-async fn run_sse_server(
-    host: &str,
-    port: u16,
-    _engine: EngineManager,
-    _bridge: Arc<Bridge>,
-) -> Result<()> {
-    info!("Starting SSE transport on {}:{}", host, port);
-
-    // Implementation would:
-    // 1. Create axum server with SSE endpoint
-    // 2. Set up MCP protocol handling
-    // 3. Run the HTTP server
-
-    info!("SSE transport is not yet fully implemented");
-
-    // Keep the process alive
-    tokio::signal::ctrl_c().await?;
-
-    Ok(())
-}
-
-/// Run the MCP server with streamable HTTP transport
+/// Run the MCP server with streamable HTTP transport (handles both SSE and HTTP)
 async fn run_http_server(
     host: &str,
     port: u16,
-    _engine: EngineManager,
-    _bridge: Arc<Bridge>,
+    engine: EngineManager,
+    bridge: Arc<Bridge>,
+    registry: Arc<ToolRegistry>,
 ) -> Result<()> {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+        session::local::LocalSessionManager,
+    };
+    use tokio_util::sync::CancellationToken;
+
     info!("Starting streamable HTTP transport on {}:{}", host, port);
 
-    // Implementation would:
-    // 1. Create axum server with MCP HTTP endpoints
-    // 2. Set up POST /mcp endpoint for requests
-    // 3. Run the HTTP server
+    let ct = CancellationToken::new();
 
-    info!("HTTP transport is not yet fully implemented");
+    let engine = engine.engine();
+    let service = StreamableHttpService::new(
+        move || {
+            Ok(montygate_mcp::MontyGateMcpServer::new(
+                engine.clone(),
+                bridge.clone(),
+                registry.clone(),
+            ))
+        },
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig {
+            stateful_mode: true,
+            cancellation_token: ct.child_token(),
+            ..Default::default()
+        },
+    );
 
-    // Keep the process alive
-    tokio::signal::ctrl_c().await?;
+    let router = axum::Router::new().nest_service("/mcp", service);
+
+    let bind_addr = format!("{}:{}", host, port);
+    let tcp_listener = tokio::net::TcpListener::bind(&bind_addr)
+        .await
+        .with_context(|| format!("Failed to bind to {}", bind_addr))?;
+
+    info!("MCP server listening on http://{}/mcp", bind_addr);
+
+    axum::serve(tcp_listener, router)
+        .with_graceful_shutdown(async move {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Received shutdown signal");
+            ct.cancel();
+        })
+        .await
+        .context("HTTP server error")?;
 
     Ok(())
 }

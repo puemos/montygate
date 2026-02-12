@@ -12,4 +12,4 @@ pub mod server;
 // Re-export commonly used types
 pub use client_pool::ClientPool;
 pub use mcp_server::MontyGateMcpServer;
-pub use server::{McpServerBuilder, McpTransport, MontyGateServerHandler, RmcpClientPool};
+pub use server::{McpServerBuilder, McpTransport, MontyGateServerHandler};

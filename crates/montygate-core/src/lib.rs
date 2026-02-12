@@ -14,7 +14,7 @@ pub mod registry;
 pub mod types;
 
 // Re-export commonly used types
-pub use bridge::{Bridge, BridgeBuilder, McpClientPool};
+pub use bridge::{ApprovalHandler, AutoApproveHandler, Bridge, BridgeBuilder, McpClientPool};
 pub use engine::{EngineManager, ExecutionEngine, MockEngine, MontyEngine, SimpleDispatcher, ToolDispatcher};
 pub use policy::{PolicyDecision, PolicyEngine};
 pub use registry::{ToolId, ToolRegistry, ToolRoute};

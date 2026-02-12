@@ -17,7 +17,7 @@
 
 ## The Problem
 
-Every MCP tool definition costs tokens. Connect 5 servers with 10 tools each and you burn **~55K tokens** before the conversation starts. Each round-trip adds more. It doesn't scale.
+Every tool call is a full LLM round-trip. 5 sequential calls = 5 turns of latency, context, and cost. Connect multiple MCP servers and each interaction fans out into a chain of individual calls. It doesn't scale.
 
 ## The Solution
 
@@ -47,7 +47,7 @@ MontyGate takes a fundamentally different approach: **N servers &rarr; 1 server 
  └──────────────────────────────────────────────────┘
 ```
 
-Instead of 5 sequential tool calls (50K+ tokens), the LLM writes one `run_program` invocation (~200 tokens):
+Instead of 5 sequential tool calls (5 round-trips), the LLM writes one `run_program` invocation:
 
 ```python
 # Single run_program call replaces 3 round-trips
@@ -235,7 +235,15 @@ result = tool("memory.read_graph")
 tool("everything.echo", message=f"Stored {len(result)} entities")
 ```
 
-**3 servers, 4 tool calls, 1 round-trip.** Without MontyGate this would cost 4 separate LLM turns and ~40K extra tokens.
+**3 servers, 4 tool calls, 1 round-trip.** Without MontyGate this would be 4 separate LLM round-trips.
+
+> **Note on token savings:** Tool schemas are still communicated to the LLM (in the `run_program` tool description), so the up-front schema cost is relocated rather than eliminated. The primary wins are **batch execution** (N tool calls in 1 round-trip) and **programmatic orchestration** (conditionals, loops, data transformation between calls).
+
+## Python Subset
+
+MontyGate uses the [Monty interpreter](https://github.com/pydantic/monty) (v0.0.4), a sandboxed Python implementation in Rust. It supports variables, arithmetic, strings, lists, dicts, control flow, function definitions, f-strings, try/except, comprehensions, slicing, `print()`, and `tool()` calls. User-defined classes and `import` of arbitrary modules are not available.
+
+See [docs/python-support.md](docs/python-support.md) for the full reference.
 
 ## Architecture
 
@@ -451,10 +459,11 @@ cargo tarpaulin           # Coverage report
 - [x] MCP server with `run_program` tool via rmcp
 - [x] CLI with server management and config commands
 - [x] Comprehensive test suite (256 tests)
+- [x] SSE and streamable HTTP transport support
+- [x] Direct tool invocation escape hatch (`call_tool`)
+- [x] Approval handler integration for human-in-the-loop workflows
 - [ ] Full rmcp client integration for downstream tool calls
-- [ ] Human-in-the-loop approval workflow
 - [ ] Snapshot-based execution persistence (pause/resume)
-- [ ] SSE and streamable HTTP transport support
 - [ ] WebAssembly build for browser deployment
 
 ## Contributing

@@ -5,6 +5,9 @@ use montygate_core::{
 use rmcp::{model::CallToolRequestParams, RoleClient, ServiceExt};
 use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+};
 use std::collections::HashMap;
 use tracing::{debug, info, instrument, warn};
 
@@ -56,17 +59,17 @@ impl ClientPool {
                     ))
                 })?
             }
-            TransportConfig::Sse { url } => {
-                return Err(MontyGateError::Mcp(format!(
-                    "SSE transport not yet implemented for server '{}' (url: {})",
-                    name, url
-                )));
-            }
-            TransportConfig::StreamableHttp { url } => {
-                return Err(MontyGateError::Mcp(format!(
-                    "Streamable HTTP transport not yet implemented for server '{}' (url: {})",
-                    name, url
-                )));
+            TransportConfig::Sse { url } | TransportConfig::StreamableHttp { url } => {
+                debug!("Using streamable HTTP transport: {}", url);
+                let config = StreamableHttpClientTransportConfig::with_uri(&*url);
+                let transport = StreamableHttpClientTransport::from_config(config);
+
+                ().serve(transport).await.map_err(|e| {
+                    MontyGateError::Mcp(format!(
+                        "Failed to initialize MCP connection to '{}': {}",
+                        name, e
+                    ))
+                })?
             }
         };
 

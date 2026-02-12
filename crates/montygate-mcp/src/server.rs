@@ -1,94 +1,9 @@
-use async_trait::async_trait;
 use montygate_core::{
-    ExecutionEngine, ExecutionResult, MontyGateError, Result, RunProgramInput, ToolDefinition,
+    ExecutionEngine, ExecutionResult, MontyGateError, Result, RunProgramInput,
     ToolDispatcher,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, instrument};
-
-/// MCP client pool implementation using rmcp
-#[derive(Debug)]
-pub struct RmcpClientPool {
-    clients: HashMap<String, Arc<dyn McpClient>>,
-}
-
-impl RmcpClientPool {
-    pub fn new() -> Self {
-        Self {
-            clients: HashMap::new(),
-        }
-    }
-
-    pub async fn connect_server(
-        &mut self,
-        name: &str,
-        transport: montygate_core::TransportConfig,
-    ) -> Result<()> {
-        info!("Connecting to MCP server '{}'", name);
-        
-        // Implementation would use rmcp to connect
-        // For now, this is a placeholder
-        debug!("Transport config: {:?}", transport);
-        
-        Ok(())
-    }
-}
-
-impl Default for RmcpClientPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl montygate_core::McpClientPool for RmcpClientPool {
-    #[instrument(skip(self, _arguments))]
-    async fn call_tool(
-        &self,
-        server_name: &str,
-        tool_name: &str,
-        _arguments: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        debug!(
-            "Calling tool '{}' on server '{}'",
-            tool_name, server_name
-        );
-
-        // Implementation would:
-        // 1. Look up the client for the server
-        // 2. Call the tool via rmcp
-        // 3. Return the result
-
-        todo!("Implement actual MCP tool calling with rmcp")
-    }
-
-    async fn list_server_tools(&self, server_name: &str) -> Result<Vec<ToolDefinition>> {
-        debug!("Listing tools for server '{}'", server_name);
-        
-        // Implementation would:
-        // 1. Look up the client for the server
-        // 2. Call tools/list via rmcp
-        // 3. Convert rmcp types to our types
-        
-        todo!("Implement actual MCP tool listing with rmcp")
-    }
-
-    fn is_server_connected(&self, server_name: &str) -> bool {
-        self.clients.contains_key(server_name)
-    }
-
-    fn connected_servers(&self) -> Vec<String> {
-        self.clients.keys().cloned().collect()
-    }
-}
-
-/// Trait abstraction for MCP clients
-#[async_trait]
-pub trait McpClient: Send + Sync + std::fmt::Debug {
-    async fn call_tool(&self, tool_name: &str, arguments: serde_json::Value) -> Result<serde_json::Value>;
-    async fn list_tools(&self) -> Result<Vec<ToolDefinition>>;
-}
 
 /// Server handler for the upstream MCP server
 /// 
@@ -220,40 +135,8 @@ impl McpServerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use montygate_core::{McpClientPool, MockEngine, SimpleDispatcher};
-
-    // === RmcpClientPool ===
-
-    #[test]
-    fn test_rmcp_client_pool_new() {
-        let pool = RmcpClientPool::new();
-        assert!(pool.connected_servers().is_empty());
-    }
-
-    #[test]
-    fn test_rmcp_client_pool_default() {
-        let pool = RmcpClientPool::default();
-        assert!(pool.connected_servers().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_rmcp_client_pool_connect() {
-        let mut pool = RmcpClientPool::new();
-        let transport = montygate_core::TransportConfig::Stdio {
-            command: "echo".to_string(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        let result = pool.connect_server("test", transport).await;
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_rmcp_client_pool_is_server_connected() {
-        let pool = RmcpClientPool::new();
-        // No servers connected
-        assert!(!pool.is_server_connected("any"));
-    }
+    use montygate_core::{MockEngine, SimpleDispatcher};
+    use std::collections::HashMap;
 
     // === MontyGateServerHandler ===
 

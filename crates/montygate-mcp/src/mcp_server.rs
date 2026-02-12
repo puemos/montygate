@@ -39,6 +39,23 @@ fn default_true() -> bool {
     true
 }
 
+/// Input parameters for the call_tool escape hatch
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CallToolRequest {
+    /// Server name (e.g. "github")
+    #[schemars(description = "Name of the downstream MCP server")]
+    pub server: String,
+
+    /// Tool name (e.g. "create_issue")
+    #[schemars(description = "Name of the tool on the server")]
+    pub tool: String,
+
+    /// Arguments to pass to the tool
+    #[serde(default)]
+    #[schemars(description = "JSON arguments for the tool")]
+    pub args: serde_json::Value,
+}
+
 /// Output from the run_program tool
 #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
 pub struct RunProgramOutput {
@@ -121,16 +138,13 @@ impl MontyGateMcpServer {
         Ok(())
     }
 
-    /// Build a dynamic description for run_program including available tools
-    fn build_dynamic_description(&self) -> String {
+    /// Build the tool catalog listing available downstream tools
+    fn build_tool_catalog(&self) -> Option<String> {
         let mut tools = self.registry.list_tools();
         tools.sort();
 
         if tools.is_empty() {
-            return "Execute Python code in a sandboxed interpreter. \
-                    The code can call tools via the tool() function. \
-                    No downstream tools are currently connected."
-                .to_string();
+            return None;
         }
 
         let mut catalog = String::new();
@@ -145,14 +159,48 @@ impl MontyGateMcpServer {
             }
         }
 
-        format!(
-            "Execute Python code in a sandboxed interpreter with access to {} tools.\n\n\
-             Available tools:\n{}\n\
-             Usage: result = tool(\"server.tool_name\", arg1=val1, ...)\n\
-             The code runs in a secure sandbox with resource limits.",
-            tools.len(),
-            catalog
-        )
+        Some(catalog)
+    }
+
+    /// Build a dynamic description for run_program including available tools
+    fn build_run_program_description(&self) -> String {
+        match self.build_tool_catalog() {
+            None => {
+                "Execute Python code in a sandboxed interpreter. \
+                 The code can call tools via the tool() function. \
+                 No downstream tools are currently connected."
+                    .to_string()
+            }
+            Some(catalog) => {
+                let count = self.registry.list_tools().len();
+                format!(
+                    "Execute Python code in a sandboxed interpreter with access to {} tools.\n\n\
+                     Available tools:\n{}\n\
+                     Usage: result = tool(\"server.tool_name\", arg1=val1, ...)\n\
+                     The code runs in a secure sandbox with resource limits.",
+                    count, catalog
+                )
+            }
+        }
+    }
+
+    /// Build a dynamic description for call_tool including available tools
+    fn build_call_tool_description(&self) -> String {
+        match self.build_tool_catalog() {
+            None => {
+                "Directly invoke a single tool on a downstream MCP server. \
+                 No downstream tools are currently connected."
+                    .to_string()
+            }
+            Some(catalog) => {
+                format!(
+                    "Directly invoke a single tool on a downstream MCP server. \
+                     Use run_program for multi-tool orchestration; use call_tool for simple one-shot calls.\n\n\
+                     Available tools:\n{}",
+                    catalog
+                )
+            }
+        }
     }
 }
 
@@ -184,6 +232,25 @@ impl MontyGateMcpServer {
             Err(e) => {
                 error!("Execution failed: {}", e);
                 format!("Execution error: {}", e)
+            }
+        }
+    }
+
+    /// Directly invoke a single tool on a downstream server without writing Python.
+    /// Use this as a fallback when run_program is not needed (single tool call, no orchestration).
+    #[tool(name = "call_tool", description = "Directly invoke a single tool on a downstream MCP server. Use run_program for multi-tool orchestration; use call_tool for simple one-shot calls.")]
+    async fn call_tool(&self, request: Parameters<CallToolRequest>) -> String {
+        let params = request.0;
+        let qualified_name = format!("{}.{}", params.server, params.tool);
+        debug!("Received call_tool for '{}'", qualified_name);
+
+        match self.dispatcher.dispatch(&qualified_name, params.args).await {
+            Ok(result) => {
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => {
+                error!("call_tool '{}' failed: {}", qualified_name, e);
+                format!("Tool call error: {}", e)
             }
         }
     }
@@ -223,10 +290,16 @@ impl ServerHandler for MontyGateMcpServer {
         async move {
             let mut tools = self.tool_router.list_all();
 
-            // Dynamically update the run_program description with available tools
+            // Dynamically update tool descriptions with available tools
             for tool in &mut tools {
-                if tool.name == "run_program" {
-                    tool.description = Some(self.build_dynamic_description().into());
+                match tool.name.as_ref() {
+                    "run_program" => {
+                        tool.description = Some(self.build_run_program_description().into());
+                    }
+                    "call_tool" => {
+                        tool.description = Some(self.build_call_tool_description().into());
+                    }
+                    _ => {}
                 }
             }
 
@@ -252,10 +325,16 @@ impl ServerHandler for MontyGateMcpServer {
     fn get_tool(&self, name: &str) -> Option<Tool> {
         let mut tool = self.tool_router.get(name).cloned();
 
-        // Apply dynamic description for run_program
+        // Apply dynamic descriptions
         if let Some(ref mut t) = tool {
-            if t.name == "run_program" {
-                t.description = Some(self.build_dynamic_description().into());
+            match t.name.as_ref() {
+                "run_program" => {
+                    t.description = Some(self.build_run_program_description().into());
+                }
+                "call_tool" => {
+                    t.description = Some(self.build_call_tool_description().into());
+                }
+                _ => {}
             }
         }
 
@@ -360,20 +439,26 @@ mod tests {
     #[test]
     fn test_dynamic_description_empty_registry() {
         let server = create_test_server();
-        let desc = server.build_dynamic_description();
+        let desc = server.build_run_program_description();
         assert!(desc.contains("No downstream tools are currently connected"));
+        let call_desc = server.build_call_tool_description();
+        assert!(call_desc.contains("No downstream tools are currently connected"));
     }
 
     #[test]
     fn test_dynamic_description_with_tools() {
         let server = create_test_server_with_tools();
-        let desc = server.build_dynamic_description();
+        let desc = server.build_run_program_description();
         assert!(desc.contains("github.create_issue"));
         assert!(desc.contains("github.list_repos"));
         assert!(desc.contains("Create a GitHub issue"));
         assert!(desc.contains("List GitHub repositories"));
         assert!(desc.contains("2 tools"));
         assert!(desc.contains("tool("));
+
+        let call_desc = server.build_call_tool_description();
+        assert!(call_desc.contains("github.create_issue"));
+        assert!(call_desc.contains("call_tool"));
     }
 
     // === parse_inputs ===
