@@ -1,5 +1,6 @@
 use montygate_core::{
     ExecutionEngine, ExecutionResult, MontyGateError, RunProgramInput, ToolDispatcher,
+    ToolRegistry,
 };
 use std::sync::Arc;
 use tracing::{debug, error, info};
@@ -8,10 +9,13 @@ use tracing::{debug, error, info};
 pub use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_handler, tool_router,
+    tool, tool_router,
     transport::stdio,
-    ErrorData as McpError, ServerHandler, ServiceExt,
+    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
+
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::service::RequestContext;
 
 /// Input parameters for the run_program tool
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -19,12 +23,12 @@ pub struct RunProgramRequest {
     /// Python code to execute in the sandboxed interpreter
     #[schemars(description = "Python code that can call tools via the tool() function")]
     pub code: String,
-    
+
     /// Optional input variables to pass to the code
     #[serde(default)]
     #[schemars(description = "Input variables available to the code")]
     pub inputs: Option<serde_json::Value>,
-    
+
     /// Whether to type-check the code before execution
     #[serde(default = "default_true")]
     #[schemars(description = "Enable type checking before execution")]
@@ -42,7 +46,7 @@ pub struct RunProgramOutput {
     pub result: serde_json::Value,
     /// Standard output from the code
     pub stdout: String,
-    /// Standard error from the code  
+    /// Standard error from the code
     pub stderr: String,
     /// Execution trace showing all tool calls
     pub trace: Vec<ToolCallInfo>,
@@ -69,49 +73,86 @@ pub struct ExecutionStats {
 }
 
 /// MontyGate MCP Server that exposes the run_program tool
-/// 
+///
 /// This is the upstream MCP server that MCP clients (like Claude Desktop) connect to.
 /// It provides a single tool: `run_program` that executes Monty code.
 #[derive(Clone, Debug)]
 pub struct MontyGateMcpServer {
     engine: Arc<dyn ExecutionEngine>,
     dispatcher: Arc<dyn ToolDispatcher>,
+    registry: Arc<ToolRegistry>,
     tool_router: ToolRouter<Self>,
 }
 
 impl MontyGateMcpServer {
-    /// Create a new MCP server with the given engine and dispatcher
+    /// Create a new MCP server with the given engine, dispatcher, and registry
     pub fn new(
         engine: Arc<dyn ExecutionEngine>,
         dispatcher: Arc<dyn ToolDispatcher>,
+        registry: Arc<ToolRegistry>,
     ) -> Self {
         Self {
             engine,
             dispatcher,
+            registry,
             tool_router: Self::tool_router(),
         }
     }
 
     /// Build the server with stdio transport and run it
-    /// 
+    ///
     /// This method sets up the MCP server with stdio transport and runs it,
     /// waiting for connections from MCP clients.
     pub async fn run_stdio(self) -> anyhow::Result<()> {
         info!("Starting MontyGate MCP server with stdio transport");
-        
+
         let service = self.serve(stdio()).await.map_err(|e| {
             anyhow::anyhow!("Failed to start MCP server: {}", e)
         })?;
-        
+
         info!("MCP server running, waiting for connections...");
-        
+
         // Wait for the server to complete (typically when stdin closes)
         service.waiting().await.map_err(|e| {
             anyhow::anyhow!("MCP server error: {}", e)
         })?;
-        
+
         info!("MCP server shut down");
         Ok(())
+    }
+
+    /// Build a dynamic description for run_program including available tools
+    fn build_dynamic_description(&self) -> String {
+        let mut tools = self.registry.list_tools();
+        tools.sort();
+
+        if tools.is_empty() {
+            return "Execute Python code in a sandboxed interpreter. \
+                    The code can call tools via the tool() function. \
+                    No downstream tools are currently connected."
+                .to_string();
+        }
+
+        let mut catalog = String::new();
+        for name in &tools {
+            if let Ok(route) = self.registry.resolve(name) {
+                let desc = route
+                    .definition
+                    .description
+                    .as_deref()
+                    .unwrap_or("No description");
+                catalog.push_str(&format!("  - {} - {}\n", name, desc));
+            }
+        }
+
+        format!(
+            "Execute Python code in a sandboxed interpreter with access to {} tools.\n\n\
+             Available tools:\n{}\n\
+             Usage: result = tool(\"server.tool_name\", arg1=val1, ...)\n\
+             The code runs in a secure sandbox with resource limits.",
+            tools.len(),
+            catalog
+        )
     }
 }
 
@@ -119,22 +160,22 @@ impl MontyGateMcpServer {
 #[tool_router]
 impl MontyGateMcpServer {
     /// Execute Python code in a sandboxed interpreter
-    /// 
+    ///
     /// The code can call tools via the `tool()` function:
-    /// result = await tool('server.tool_name', arg1=val1, ...)
-    /// 
+    /// result = tool('server.tool_name', arg1=val1, ...)
+    ///
     /// Available tools depend on the configured downstream MCP servers.
-    #[tool(name = "run_program", description = "Execute Python code in a sandboxed interpreter. The code can call tools via the tool() function. All tool calls are async - use await. The code runs in a secure sandbox with resource limits.")]
+    #[tool(name = "run_program", description = "Execute Python code in a sandboxed interpreter. The code can call tools via the tool() function: result = tool('server.tool_name', arg1=val1, ...). The code runs in a secure sandbox with resource limits.")]
     async fn run_program(&self, request: Parameters<RunProgramRequest>) -> String {
         let params = request.0;
         debug!("Received run_program call with {} bytes of code", params.code.len());
-        
+
         let input = RunProgramInput {
             code: params.code,
             inputs: parse_inputs(params.inputs),
             type_check: params.type_check,
         };
-        
+
         match self.execute_program(input).await {
             Ok(result) => {
                 let output = execution_result_to_output(result);
@@ -156,7 +197,8 @@ impl MontyGateMcpServer {
     }
 }
 
-#[tool_handler]
+// Manual ServerHandler implementation (instead of #[tool_handler])
+// so we can dynamically modify the run_program tool description
 impl ServerHandler for MontyGateMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -171,6 +213,53 @@ impl ServerHandler for MontyGateMcpServer {
                 the tool() function.".to_string()
             ),
         }
+    }
+
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+        async move {
+            let mut tools = self.tool_router.list_all();
+
+            // Dynamically update the run_program description with available tools
+            for tool in &mut tools {
+                if tool.name == "run_program" {
+                    tool.description = Some(self.build_dynamic_description().into());
+                }
+            }
+
+            Ok(ListToolsResult {
+                tools,
+                meta: None,
+                next_cursor: None,
+            })
+        }
+    }
+
+    fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+        async move {
+            let tcc = ToolCallContext::new(self, request, context);
+            self.tool_router.call(tcc).await
+        }
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        let mut tool = self.tool_router.get(name).cloned();
+
+        // Apply dynamic description for run_program
+        if let Some(ref mut t) = tool {
+            if t.name == "run_program" {
+                t.description = Some(self.build_dynamic_description().into());
+            }
+        }
+
+        tool
     }
 }
 
@@ -208,12 +297,46 @@ fn execution_result_to_output(result: ExecutionResult) -> RunProgramOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use montygate_core::{MockEngine, SimpleDispatcher, ToolCall};
+    use montygate_core::{MockEngine, SimpleDispatcher, ToolCall, ToolDefinition};
 
     fn create_test_server() -> MontyGateMcpServer {
         let engine = Arc::new(MockEngine::default());
         let dispatcher = Arc::new(SimpleDispatcher::new());
-        MontyGateMcpServer::new(engine, dispatcher)
+        let registry = Arc::new(ToolRegistry::new());
+        MontyGateMcpServer::new(engine, dispatcher, registry)
+    }
+
+    fn create_test_server_with_tools() -> MontyGateMcpServer {
+        let engine = Arc::new(MockEngine::default());
+        let dispatcher = Arc::new(SimpleDispatcher::new());
+        let registry = Arc::new(ToolRegistry::new());
+
+        registry
+            .register_server_tools(
+                "github",
+                vec![
+                    ToolDefinition {
+                        name: "create_issue".to_string(),
+                        description: Some("Create a GitHub issue".to_string()),
+                        input_schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "repo": {"type": "string"},
+                                "title": {"type": "string"}
+                            },
+                            "required": ["repo", "title"]
+                        }),
+                    },
+                    ToolDefinition {
+                        name: "list_repos".to_string(),
+                        description: Some("List GitHub repositories".to_string()),
+                        input_schema: serde_json::json!({"type": "object"}),
+                    },
+                ],
+            )
+            .unwrap();
+
+        MontyGateMcpServer::new(engine, dispatcher, registry)
     }
 
     // === MontyGateMcpServer ===
@@ -230,6 +353,27 @@ mod tests {
         let server = create_test_server();
         let cloned = server.clone();
         let _ = format!("{:?}", cloned);
+    }
+
+    // === Dynamic description ===
+
+    #[test]
+    fn test_dynamic_description_empty_registry() {
+        let server = create_test_server();
+        let desc = server.build_dynamic_description();
+        assert!(desc.contains("No downstream tools are currently connected"));
+    }
+
+    #[test]
+    fn test_dynamic_description_with_tools() {
+        let server = create_test_server_with_tools();
+        let desc = server.build_dynamic_description();
+        assert!(desc.contains("github.create_issue"));
+        assert!(desc.contains("github.list_repos"));
+        assert!(desc.contains("Create a GitHub issue"));
+        assert!(desc.contains("List GitHub repositories"));
+        assert!(desc.contains("2 tools"));
+        assert!(desc.contains("tool("));
     }
 
     // === parse_inputs ===
@@ -254,7 +398,6 @@ mod tests {
 
     #[test]
     fn test_parse_inputs_non_object() {
-        // Passing a non-object value should return empty map
         let result = parse_inputs(Some(serde_json::json!("just a string")));
         assert!(result.is_empty());
 

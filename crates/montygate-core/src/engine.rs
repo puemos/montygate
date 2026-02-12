@@ -1,9 +1,14 @@
 use crate::types::{ExecutionResult, ResourceLimits, Result, RunProgramInput, ToolCall};
 use crate::MontyGateError;
+use monty::{
+    CollectStringPrint, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject,
+    MontyRun, RunProgress,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, info, warn};
 
 /// Trait for dispatching external tool calls
 #[async_trait::async_trait]
@@ -218,6 +223,485 @@ impl Default for MockEngine {
     }
 }
 
+/// A tool call request sent from the Monty blocking thread to the async dispatcher.
+struct ToolCallRequest {
+    tool_name: String,
+    args: serde_json::Value,
+    response_tx: oneshot::Sender<std::result::Result<serde_json::Value, String>>,
+}
+
+/// Real execution engine backed by Monty (RustPython-based sandboxed interpreter).
+///
+/// Runs Python code with a single registered external function `tool(name, ...)`.
+/// When the Python code calls `tool("server.tool_name", key=val)`, Monty pauses
+/// execution and we dispatch the call to the MCP tool via the `ToolDispatcher`,
+/// then resume with the result.
+///
+/// Monty's internal types are `!Send`, so execution runs inside
+/// `tokio::task::spawn_blocking` with channels bridging to the async world.
+#[derive(Debug, Clone)]
+pub struct MontyEngine {
+    limits: ResourceLimits,
+}
+
+impl MontyEngine {
+    pub fn new(limits: ResourceLimits) -> Self {
+        Self { limits }
+    }
+
+    /// Parse a tool call from Monty's FunctionCall args/kwargs.
+    ///
+    /// Convention: `tool("server.tool_name", key=val, ...)` or `tool("server.tool_name", {"key": val})`
+    /// - args[0] = tool name string
+    /// - kwargs = tool arguments as dict, OR args[1] if it's a dict
+    fn parse_tool_call(
+        args: &[MontyObject],
+        kwargs: &[(MontyObject, MontyObject)],
+    ) -> std::result::Result<(String, serde_json::Value), String> {
+        // First arg must be the tool name string
+        let tool_name = match args.first() {
+            Some(MontyObject::String(s)) => s.clone(),
+            Some(other) => {
+                return Err(format!(
+                    "tool() first argument must be a string (tool name), got: {}",
+                    other.py_repr()
+                ));
+            }
+            None => {
+                return Err("tool() requires at least one argument (tool name)".to_string());
+            }
+        };
+
+        // Build arguments from kwargs first, then fall back to args[1] if it's a dict
+        let tool_args = if !kwargs.is_empty() {
+            let mut map = serde_json::Map::new();
+            for (k, v) in kwargs {
+                let key = match k {
+                    MontyObject::String(s) => s.clone(),
+                    other => other.py_repr(),
+                };
+                map.insert(key, crate::convert::monty_to_json(v));
+            }
+            serde_json::Value::Object(map)
+        } else if let Some(dict_arg) = args.get(1) {
+            crate::convert::monty_to_json(dict_arg)
+        } else {
+            serde_json::json!({})
+        };
+
+        Ok((tool_name, tool_args))
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionEngine for MontyEngine {
+    async fn execute(
+        &self,
+        input: RunProgramInput,
+        dispatcher: Arc<dyn ToolDispatcher>,
+    ) -> Result<ExecutionResult> {
+        let start = Instant::now();
+
+        // Validate code length
+        if input.code.len() > self.limits.max_code_length {
+            return Err(MontyGateError::ResourceLimitExceeded(format!(
+                "Code exceeds maximum length of {} characters",
+                self.limits.max_code_length
+            )));
+        }
+
+        let max_external_calls = self.limits.max_external_calls;
+
+        info!("Starting Monty execution");
+
+        // Channel for tool call requests from the blocking Monty thread
+        let (call_tx, mut call_rx) = mpsc::channel::<ToolCallRequest>(1);
+
+        // Build monty resource limits
+        let monty_limits = monty::ResourceLimits {
+            max_memory: Some(self.limits.max_memory_bytes),
+            max_duration: Some(std::time::Duration::from_millis(
+                self.limits.max_execution_time_ms,
+            )),
+            max_recursion_depth: Some(self.limits.max_stack_depth),
+            gc_interval: None,
+            max_allocations: None,
+        };
+
+        let code = input.code.clone();
+
+        // Spawn the Monty interpreter in a blocking thread
+        let monty_handle = tokio::task::spawn_blocking(move || {
+            run_monty_blocking(&code, monty_limits, max_external_calls, call_tx)
+        });
+
+        // Async side: dispatch tool calls as they come in from the Monty thread
+        let mut trace = Vec::new();
+        while let Some(req) = call_rx.recv().await {
+            let call_start = Instant::now();
+            debug!("Dispatching tool call: {}", req.tool_name);
+
+            let parts: Vec<&str> = req.tool_name.split('.').collect();
+            let (server, tool) = if parts.len() >= 2 {
+                (parts[0].to_string(), parts[1..].join("."))
+            } else {
+                ("unknown".to_string(), req.tool_name.clone())
+            };
+
+            match dispatcher.dispatch(&req.tool_name, req.args.clone()).await {
+                Ok(result) => {
+                    let duration = call_start.elapsed().as_millis() as u64;
+                    let call =
+                        ToolCall::new(server, tool, req.args).with_result(result.clone(), duration);
+                    trace.push(call);
+                    // Send result back to Monty thread; ignore error if receiver dropped
+                    let _ = req.response_tx.send(Ok(result));
+                }
+                Err(e) => {
+                    let duration = call_start.elapsed().as_millis() as u64;
+                    let err_str = e.to_string();
+                    let call =
+                        ToolCall::new(server, tool, req.args).with_error(err_str.clone(), duration);
+                    trace.push(call);
+                    let _ = req.response_tx.send(Err(err_str));
+                }
+            }
+        }
+
+        // Wait for the Monty thread to complete
+        let monty_result = monty_handle.await.map_err(|e| {
+            MontyGateError::Execution(format!("Monty execution thread panicked: {}", e))
+        })?;
+
+        let total_duration = start.elapsed().as_millis() as u64;
+        let monty_duration = monty_result.execution_time_ms;
+        let trace_len = trace.len();
+
+        info!(
+            "Monty execution completed in {}ms with {} tool calls",
+            total_duration, trace_len
+        );
+
+        match monty_result.error {
+            Some(err) if !monty_result.success => {
+                // Execution failed but we still return partial results
+                warn!("Monty execution error: {}", err);
+                Ok(ExecutionResult {
+                    output: serde_json::json!({
+                        "status": "error",
+                        "error": err,
+                    }),
+                    stdout: monty_result.stdout,
+                    stderr: err.clone(),
+                    trace,
+                    stats: crate::types::ExecutionStats {
+                        total_duration_ms: total_duration,
+                        monty_execution_ms: monty_duration,
+                        external_calls: trace_len,
+                        memory_peak_bytes: 0,
+                        steps_executed: 0,
+                    },
+                })
+            }
+            _ => Ok(ExecutionResult {
+                output: monty_result.result,
+                stdout: monty_result.stdout,
+                stderr: String::new(),
+                trace,
+                stats: crate::types::ExecutionStats {
+                    total_duration_ms: total_duration,
+                    monty_execution_ms: monty_duration,
+                    external_calls: trace_len,
+                    memory_peak_bytes: 0,
+                    steps_executed: 0,
+                },
+            }),
+        }
+    }
+
+    fn validate(&self, code: &str) -> Result<()> {
+        // Use bracket balancing as a basic syntax check.
+        // Monty's parser could be used here in the future.
+        let mut paren_depth = 0i32;
+        let mut brace_depth = 0i32;
+        let mut bracket_depth = 0i32;
+
+        for (line_num, line) in code.lines().enumerate() {
+            for ch in line.chars() {
+                match ch {
+                    '(' => paren_depth += 1,
+                    ')' => paren_depth -= 1,
+                    '{' => brace_depth += 1,
+                    '}' => brace_depth -= 1,
+                    '[' => bracket_depth += 1,
+                    ']' => bracket_depth -= 1,
+                    _ => {}
+                }
+
+                if paren_depth < 0 || brace_depth < 0 || bracket_depth < 0 {
+                    return Err(MontyGateError::Parse(format!(
+                        "Unbalanced brackets at line {}",
+                        line_num + 1
+                    )));
+                }
+            }
+        }
+
+        if paren_depth != 0 || brace_depth != 0 || bracket_depth != 0 {
+            return Err(MontyGateError::Parse(
+                "Unbalanced brackets in code".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn limits(&self) -> ResourceLimits {
+        self.limits.clone()
+    }
+}
+
+impl Default for MontyEngine {
+    fn default() -> Self {
+        Self::new(ResourceLimits::default())
+    }
+}
+
+/// Result from the blocking Monty execution thread.
+struct MontyBlockingResult {
+    success: bool,
+    result: serde_json::Value,
+    stdout: String,
+    error: Option<String>,
+    execution_time_ms: u64,
+}
+
+/// Run the Monty interpreter in a blocking context.
+///
+/// This function is called inside `spawn_blocking`. It creates the Monty runtime,
+/// registers the `tool` external function, and runs the state machine loop.
+/// Tool calls are sent over the channel to be dispatched by the async side.
+fn run_monty_blocking(
+    code: &str,
+    limits: monty::ResourceLimits,
+    max_external_calls: usize,
+    call_tx: mpsc::Sender<ToolCallRequest>,
+) -> MontyBlockingResult {
+    let start = Instant::now();
+
+    // Register "tool" as the single external function
+    let ext_fns = vec!["tool".to_string()];
+
+    let runner = match MontyRun::new(code.to_string(), "program.py", vec![], ext_fns) {
+        Ok(r) => r,
+        Err(e) => {
+            return MontyBlockingResult {
+                success: false,
+                result: serde_json::Value::Null,
+                stdout: String::new(),
+                error: Some(format_exception(&e)),
+                execution_time_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    let tracker = LimitedTracker::new(limits);
+    let mut print = CollectStringPrint::new();
+
+    let mut progress = match runner.start(vec![], tracker, &mut print) {
+        Ok(p) => p,
+        Err(e) => {
+            return MontyBlockingResult {
+                success: false,
+                result: serde_json::Value::Null,
+                stdout: print.output().to_string(),
+                error: Some(format_exception(&e)),
+                execution_time_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    let mut external_calls: usize = 0;
+
+    loop {
+        match progress {
+            RunProgress::Complete(value) => {
+                let json_value = crate::convert::monty_to_json(&value);
+                return MontyBlockingResult {
+                    success: true,
+                    result: json_value,
+                    stdout: print.output().to_string(),
+                    error: None,
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                };
+            }
+            RunProgress::FunctionCall {
+                function_name,
+                args,
+                kwargs,
+                call_id: _,
+                state,
+            } => {
+                // Should only be "tool" since that's the only registered function
+                if function_name != "tool" {
+                    let err = MontyException::new(
+                        ExcType::NameError,
+                        Some(format!("Unknown function: {function_name}")),
+                    );
+                    match state.run(ExternalResult::Error(err), &mut print) {
+                        Ok(p) => {
+                            progress = p;
+                            continue;
+                        }
+                        Err(e) => {
+                            return MontyBlockingResult {
+                                success: false,
+                                result: serde_json::Value::Null,
+                                stdout: print.output().to_string(),
+                                error: Some(format_exception(&e)),
+                                execution_time_ms: start.elapsed().as_millis() as u64,
+                            };
+                        }
+                    }
+                }
+
+                // Check external call limit
+                external_calls += 1;
+                if external_calls > max_external_calls {
+                    let err = MontyException::new(
+                        ExcType::RuntimeError,
+                        Some(format!(
+                            "External call limit exceeded ({} calls, max: {})",
+                            external_calls, max_external_calls
+                        )),
+                    );
+                    match state.run(ExternalResult::Error(err), &mut print) {
+                        Ok(p) => {
+                            progress = p;
+                            continue;
+                        }
+                        Err(e) => {
+                            return MontyBlockingResult {
+                                success: false,
+                                result: serde_json::Value::Null,
+                                stdout: print.output().to_string(),
+                                error: Some(format_exception(&e)),
+                                execution_time_ms: start.elapsed().as_millis() as u64,
+                            };
+                        }
+                    }
+                }
+
+                // Parse tool name and arguments
+                let (tool_name, tool_args) = match MontyEngine::parse_tool_call(&args, &kwargs) {
+                    Ok(parsed) => parsed,
+                    Err(err_msg) => {
+                        let err = MontyException::new(ExcType::TypeError, Some(err_msg));
+                        match state.run(ExternalResult::Error(err), &mut print) {
+                            Ok(p) => {
+                                progress = p;
+                                continue;
+                            }
+                            Err(e) => {
+                                return MontyBlockingResult {
+                                    success: false,
+                                    result: serde_json::Value::Null,
+                                    stdout: print.output().to_string(),
+                                    error: Some(format_exception(&e)),
+                                    execution_time_ms: start.elapsed().as_millis() as u64,
+                                };
+                            }
+                        }
+                    }
+                };
+
+                // Create a oneshot channel for the response
+                let (resp_tx, resp_rx) = oneshot::channel();
+
+                let request = ToolCallRequest {
+                    tool_name: tool_name.clone(),
+                    args: tool_args,
+                    response_tx: resp_tx,
+                };
+
+                // Send the request to the async dispatcher
+                if call_tx.blocking_send(request).is_err() {
+                    // Async side dropped — abort execution
+                    return MontyBlockingResult {
+                        success: false,
+                        result: serde_json::Value::Null,
+                        stdout: print.output().to_string(),
+                        error: Some("Execution cancelled: dispatcher channel closed".to_string()),
+                        execution_time_ms: start.elapsed().as_millis() as u64,
+                    };
+                }
+
+                // Wait for the response
+                let ext_result = match resp_rx.blocking_recv() {
+                    Ok(Ok(value)) => {
+                        ExternalResult::Return(crate::convert::json_to_monty(&value))
+                    }
+                    Ok(Err(err_msg)) => ExternalResult::Error(MontyException::new(
+                        ExcType::RuntimeError,
+                        Some(format!("Tool call failed: {err_msg}")),
+                    )),
+                    Err(_) => ExternalResult::Error(MontyException::new(
+                        ExcType::RuntimeError,
+                        Some("Tool call cancelled: response channel closed".to_string()),
+                    )),
+                };
+
+                match state.run(ext_result, &mut print) {
+                    Ok(p) => progress = p,
+                    Err(e) => {
+                        return MontyBlockingResult {
+                            success: false,
+                            result: serde_json::Value::Null,
+                            stdout: print.output().to_string(),
+                            error: Some(format_exception(&e)),
+                            execution_time_ms: start.elapsed().as_millis() as u64,
+                        };
+                    }
+                }
+            }
+            RunProgress::OsCall { state, .. } => {
+                let err = MontyException::new(
+                    ExcType::RuntimeError,
+                    Some(
+                        "OS operations (filesystem, network, environment) are not available in the sandbox."
+                            .to_string(),
+                    ),
+                );
+                match state.run(ExternalResult::Error(err), &mut print) {
+                    Ok(p) => progress = p,
+                    Err(e) => {
+                        return MontyBlockingResult {
+                            success: false,
+                            result: serde_json::Value::Null,
+                            stdout: print.output().to_string(),
+                            error: Some(format_exception(&e)),
+                            execution_time_ms: start.elapsed().as_millis() as u64,
+                        };
+                    }
+                }
+            }
+            RunProgress::ResolveFutures(_) => {
+                return MontyBlockingResult {
+                    success: false,
+                    result: serde_json::Value::Null,
+                    stdout: print.output().to_string(),
+                    error: Some("Async operations are not supported in the sandbox.".to_string()),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                };
+            }
+        }
+    }
+}
+
+fn format_exception(e: &MontyException) -> String {
+    e.to_string()
+}
+
 /// Simple async tool dispatcher for testing
 #[derive(Default)]
 pub struct SimpleDispatcher {
@@ -268,6 +752,10 @@ impl EngineManager {
 
     pub fn with_mock(limits: ResourceLimits) -> Self {
         Self::new(Arc::new(MockEngine::new(limits)))
+    }
+
+    pub fn with_monty(limits: ResourceLimits) -> Self {
+        Self::new(Arc::new(MontyEngine::new(limits)))
     }
 
     pub async fn execute(

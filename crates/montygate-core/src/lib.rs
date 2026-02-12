@@ -7,6 +7,7 @@
 //! - Bridge for connecting Monty to MCP tool calls
 
 pub mod bridge;
+pub mod convert;
 pub mod engine;
 pub mod policy;
 pub mod registry;
@@ -14,7 +15,7 @@ pub mod types;
 
 // Re-export commonly used types
 pub use bridge::{Bridge, BridgeBuilder, McpClientPool};
-pub use engine::{EngineManager, ExecutionEngine, MockEngine, SimpleDispatcher, ToolDispatcher};
+pub use engine::{EngineManager, ExecutionEngine, MockEngine, MontyEngine, SimpleDispatcher, ToolDispatcher};
 pub use policy::{PolicyDecision, PolicyEngine};
 pub use registry::{ToolId, ToolRegistry, ToolRoute};
 pub use types::{

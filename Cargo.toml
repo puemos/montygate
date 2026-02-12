@@ -59,6 +59,9 @@ parking_lot = "0.12"
 # Rate limiting
 governor = "0.8"
 
+# Python execution engine (sandboxed interpreter)
+monty = { git = "https://github.com/pydantic/monty", tag = "v0.0.4" }
+
 # HTTP client (for SSE transport)
 reqwest = { version = "0.12", features = ["json", "stream"] }
 eventsource-client = "0.14"

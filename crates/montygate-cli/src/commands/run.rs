@@ -1,7 +1,7 @@
 use crate::config::{get_config_path, load_config};
 use anyhow::{Context, Result};
 use montygate_core::{
-    bridge::{Bridge, BridgeBuilder},
+    bridge::{Bridge, BridgeBuilder, McpClientPool},
     engine::EngineManager,
     policy::PolicyEngine,
     registry::ToolRegistry,
@@ -47,8 +47,27 @@ pub async fn run_server(
         }
 
         // Discover tools from the server
-        // This would call tools/list and register them
-        // For now, we skip actual tool discovery
+        match McpClientPool::list_server_tools(&client_pool, &server_config.name).await {
+            Ok(tools) => {
+                info!(
+                    "Discovered {} tools from server '{}'",
+                    tools.len(),
+                    server_config.name
+                );
+                if let Err(e) = registry.register_server_tools(&server_config.name, tools) {
+                    warn!(
+                        "Failed to register tools from '{}': {}",
+                        server_config.name, e
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to discover tools from '{}': {}",
+                    server_config.name, e
+                );
+            }
+        }
     }
 
     // Create client pool wrapper for the bridge
@@ -63,7 +82,7 @@ pub async fn run_server(
         .context("Failed to build bridge")?;
 
     // Initialize execution engine
-    let engine = EngineManager::with_mock(config.limits.clone());
+    let engine = EngineManager::with_monty(config.limits.clone());
 
     // List tools mode
     if list_tools {
@@ -79,7 +98,7 @@ pub async fn run_server(
 
     match transport.as_str() {
         "stdio" => {
-            run_stdio_server(engine, Arc::new(bridge)).await?;
+            run_stdio_server(engine, Arc::new(bridge), registry.clone()).await?;
         }
         "sse" => {
             run_sse_server(&host, port, engine, Arc::new(bridge)).await?;
@@ -100,13 +119,15 @@ pub async fn run_server(
 async fn run_stdio_server(
     engine: EngineManager,
     bridge: Arc<Bridge>,
+    registry: Arc<ToolRegistry>,
 ) -> Result<()> {
     info!("Starting stdio transport");
 
-    // Create the MCP server with the engine and dispatcher (bridge)
+    // Create the MCP server with the engine, dispatcher (bridge), and registry
     let server = montygate_mcp::MontyGateMcpServer::new(
         engine.engine(),
         bridge,
+        registry,
     );
 
     // Run the server with stdio transport
