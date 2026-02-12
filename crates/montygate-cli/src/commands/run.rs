@@ -33,7 +33,7 @@ pub async fn run_server(
     let policy = Arc::new(PolicyEngine::new(config.policy.clone()));
 
     // Connect to downstream servers and discover tools
-    let mut client_pool = montygate_mcp::ClientPool::new();
+    let mut client_pool = montygate_mcp::ClientPool::with_config(config.retry.clone().into());
 
     for server_config in &config.servers {
         info!("Connecting to downstream server '{}'", server_config.name);

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use montygate_core::{
-    bridge::McpClientPool, MontygateError, Result, ToolDefinition, TransportConfig,
+    bridge::McpClientPool, MontygateError, Result, RetryConfig, ToolDefinition, TransportConfig,
 };
 use rmcp::{model::CallToolRequestParams, RoleClient, ServiceExt};
 use rmcp::service::RunningService;
@@ -14,6 +14,7 @@ use tracing::{debug, info, instrument, warn};
 /// Manages connections to downstream MCP servers
 pub struct ClientPool {
     services: HashMap<String, RunningService<RoleClient, ()>>,
+    config: ClientPoolConfig,
 }
 
 impl std::fmt::Debug for ClientPool {
@@ -28,6 +29,14 @@ impl ClientPool {
     pub fn new() -> Self {
         Self {
             services: HashMap::new(),
+            config: ClientPoolConfig::default(),
+        }
+    }
+
+    pub fn with_config(config: ClientPoolConfig) -> Self {
+        Self {
+            services: HashMap::new(),
+            config,
         }
     }
 
@@ -138,22 +147,52 @@ impl McpClientPool for ClientPool {
             .get(server_name)
             .ok_or_else(|| MontygateError::ServerNotFound(server_name.to_string()))?;
 
-        let params = CallToolRequestParams {
-            meta: None,
-            name: tool_name.to_string().into(),
-            arguments: arguments.as_object().cloned(),
-            task: None,
-        };
+        let max_attempts = self.config.max_retries + 1;
+        let base_delay = std::time::Duration::from_millis(self.config.retry_base_delay_ms);
 
-        let result = service.call_tool(params).await.map_err(|e| {
-            MontygateError::Mcp(format!(
-                "Tool call '{}' on server '{}' failed: {}",
-                tool_name, server_name, e
-            ))
-        })?;
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                let delay = base_delay * 2u32.saturating_pow(attempt - 1);
+                debug!(
+                    "Retrying tool '{}' on server '{}' (attempt {}/{}), delay {:?}",
+                    tool_name, server_name, attempt + 1, max_attempts, delay
+                );
+                tokio::time::sleep(delay).await;
+            }
 
-        // Convert CallToolResult to serde_json::Value
-        serde_json::to_value(&result).map_err(MontygateError::from)
+            let params = CallToolRequestParams {
+                meta: None,
+                name: tool_name.to_string().into(),
+                arguments: arguments.as_object().cloned(),
+                task: None,
+            };
+
+            match service.call_tool(params).await {
+                Ok(result) => {
+                    return serde_json::to_value(&result).map_err(MontygateError::from);
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if is_retryable_error(&err_msg) && attempt + 1 < max_attempts {
+                        warn!(
+                            "Retryable error calling tool '{}' on server '{}': {}",
+                            tool_name, server_name, err_msg
+                        );
+                        continue;
+                    }
+                    return Err(MontygateError::Mcp(format!(
+                        "Tool call '{}' on server '{}' failed: {}",
+                        tool_name, server_name, e
+                    )));
+                }
+            }
+        }
+
+        // Should not be reached, but just in case
+        Err(MontygateError::Mcp(format!(
+            "Tool call '{}' on server '{}' failed after {} attempts",
+            tool_name, server_name, max_attempts
+        )))
     }
 
     async fn list_server_tools(&self, server_name: &str) -> Result<Vec<ToolDefinition>> {
@@ -190,12 +229,27 @@ impl McpClientPool for ClientPool {
     }
 }
 
+/// Check if an error message indicates a retryable transient failure.
+pub fn is_retryable_error(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
+    lower.contains("connection reset")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("broken pipe")
+        || lower.contains("connection refused")
+        || lower.contains("stream closed")
+        || lower.contains("connection closed")
+        || lower.contains("eof")
+        || lower.contains("temporarily unavailable")
+}
+
 /// Configuration for the client pool
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClientPoolConfig {
     pub connection_timeout_secs: u64,
     pub request_timeout_secs: u64,
     pub max_retries: u32,
+    pub retry_base_delay_ms: u64,
 }
 
 impl Default for ClientPoolConfig {
@@ -204,6 +258,18 @@ impl Default for ClientPoolConfig {
             connection_timeout_secs: 30,
             request_timeout_secs: 60,
             max_retries: 3,
+            retry_base_delay_ms: 100,
+        }
+    }
+}
+
+impl From<RetryConfig> for ClientPoolConfig {
+    fn from(config: RetryConfig) -> Self {
+        Self {
+            connection_timeout_secs: config.connection_timeout_secs,
+            request_timeout_secs: config.request_timeout_secs,
+            max_retries: config.max_retries,
+            retry_base_delay_ms: config.retry_base_delay_ms,
         }
     }
 }
@@ -260,6 +326,7 @@ mod tests {
         assert_eq!(config.connection_timeout_secs, 30);
         assert_eq!(config.request_timeout_secs, 60);
         assert_eq!(config.max_retries, 3);
+        assert_eq!(config.retry_base_delay_ms, 100);
     }
 
     #[test]
@@ -268,8 +335,99 @@ mod tests {
             connection_timeout_secs: 10,
             request_timeout_secs: 30,
             max_retries: 5,
+            retry_base_delay_ms: 200,
         };
         assert_eq!(config.connection_timeout_secs, 10);
         assert_eq!(config.max_retries, 5);
+        assert_eq!(config.retry_base_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_client_pool_config_serialization() {
+        let config = ClientPoolConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: ClientPoolConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.connection_timeout_secs, 30);
+        assert_eq!(deserialized.request_timeout_secs, 60);
+        assert_eq!(deserialized.max_retries, 3);
+        assert_eq!(deserialized.retry_base_delay_ms, 100);
+    }
+
+    #[test]
+    fn test_client_pool_config_from_retry_config() {
+        let retry = montygate_core::RetryConfig {
+            max_retries: 5,
+            retry_base_delay_ms: 200,
+            connection_timeout_secs: 15,
+            request_timeout_secs: 45,
+        };
+        let config: ClientPoolConfig = retry.into();
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.retry_base_delay_ms, 200);
+        assert_eq!(config.connection_timeout_secs, 15);
+        assert_eq!(config.request_timeout_secs, 45);
+    }
+
+    #[test]
+    fn test_client_pool_with_config() {
+        let config = ClientPoolConfig {
+            connection_timeout_secs: 10,
+            request_timeout_secs: 30,
+            max_retries: 5,
+            retry_base_delay_ms: 200,
+        };
+        let pool = ClientPool::with_config(config);
+        assert!(pool.list_connections().is_empty());
+        assert_eq!(pool.config.max_retries, 5);
+    }
+
+    // === is_retryable_error ===
+
+    #[test]
+    fn test_is_retryable_error_connection_reset() {
+        assert!(is_retryable_error("connection reset by peer"));
+        assert!(is_retryable_error("Connection Reset"));
+    }
+
+    #[test]
+    fn test_is_retryable_error_timeout() {
+        assert!(is_retryable_error("request timeout"));
+        assert!(is_retryable_error("connection timed out"));
+        assert!(is_retryable_error("operation Timeout"));
+    }
+
+    #[test]
+    fn test_is_retryable_error_broken_pipe() {
+        assert!(is_retryable_error("broken pipe"));
+        assert!(is_retryable_error("Broken Pipe error"));
+    }
+
+    #[test]
+    fn test_is_retryable_error_connection_refused() {
+        assert!(is_retryable_error("connection refused"));
+    }
+
+    #[test]
+    fn test_is_retryable_error_stream_closed() {
+        assert!(is_retryable_error("stream closed unexpectedly"));
+        assert!(is_retryable_error("connection closed"));
+    }
+
+    #[test]
+    fn test_is_retryable_error_eof() {
+        assert!(is_retryable_error("unexpected eof"));
+    }
+
+    #[test]
+    fn test_is_retryable_error_temporarily_unavailable() {
+        assert!(is_retryable_error("resource temporarily unavailable"));
+    }
+
+    #[test]
+    fn test_is_retryable_error_non_retryable() {
+        assert!(!is_retryable_error("invalid argument"));
+        assert!(!is_retryable_error("permission denied"));
+        assert!(!is_retryable_error("not found"));
+        assert!(!is_retryable_error("bad request"));
     }
 }

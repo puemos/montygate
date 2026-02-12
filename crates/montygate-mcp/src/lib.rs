@@ -10,6 +10,6 @@ pub mod mcp_server;
 pub mod server;
 
 // Re-export commonly used types
-pub use client_pool::ClientPool;
+pub use client_pool::{ClientPool, ClientPoolConfig};
 pub use mcp_server::MontygateMcpServer;
 pub use server::{McpServerBuilder, McpTransport, MontygateServerHandler};
