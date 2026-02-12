@@ -168,6 +168,7 @@ mod tests {
             }],
             limits: montygate_core::ResourceLimits::default(),
             policy: montygate_core::PolicyConfig::default(),
+            retry: Default::default(),
         };
 
         save_config(&config, &path).await.unwrap();

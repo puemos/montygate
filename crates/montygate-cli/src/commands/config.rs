@@ -30,6 +30,7 @@ pub async fn init_config(
         servers: vec![],
         limits: Default::default(),
         policy: Default::default(),
+        retry: Default::default(),
     };
 
     save_config(&config, &path).await?;
@@ -236,6 +237,7 @@ mod tests {
             ],
             limits: Default::default(),
             policy: Default::default(),
+            retry: Default::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();

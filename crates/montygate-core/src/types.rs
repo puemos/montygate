@@ -260,6 +260,30 @@ impl TransportConfig {
     }
 }
 
+/// Retry configuration for MCP client connections
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of retries before giving up (default: 3)
+    pub max_retries: u32,
+    /// Base delay in milliseconds for exponential backoff (default: 100)
+    pub retry_base_delay_ms: u64,
+    /// Connection timeout in seconds (default: 30)
+    pub connection_timeout_secs: u64,
+    /// Request timeout in seconds (default: 60)
+    pub request_timeout_secs: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            retry_base_delay_ms: 100,
+            connection_timeout_secs: 30,
+            request_timeout_secs: 60,
+        }
+    }
+}
+
 /// Configuration for the Montygate server
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MontygateConfig {
@@ -270,6 +294,8 @@ pub struct MontygateConfig {
     pub limits: ResourceLimits,
     #[serde(default)]
     pub policy: PolicyConfig,
+    #[serde(default)]
+    pub retry: RetryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -773,6 +799,33 @@ mod tests {
         assert_eq!(http.transport_type(), "http");
     }
 
+    // === RetryConfig ===
+
+    #[test]
+    fn test_retry_config_default() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.retry_base_delay_ms, 100);
+        assert_eq!(config.connection_timeout_secs, 30);
+        assert_eq!(config.request_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_retry_config_serialization() {
+        let config = RetryConfig {
+            max_retries: 5,
+            retry_base_delay_ms: 200,
+            connection_timeout_secs: 15,
+            request_timeout_secs: 45,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: RetryConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_retries, 5);
+        assert_eq!(deserialized.retry_base_delay_ms, 200);
+        assert_eq!(deserialized.connection_timeout_secs, 15);
+        assert_eq!(deserialized.request_timeout_secs, 45);
+    }
+
     // === Config types ===
 
     #[test]
@@ -782,6 +835,7 @@ mod tests {
         assert_eq!(config.server.version, "0.1.0");
         assert!(config.servers.is_empty());
         assert_eq!(config.limits.max_execution_time_ms, 30_000);
+        assert_eq!(config.retry.max_retries, 3);
     }
 
     #[test]
@@ -884,6 +938,22 @@ mod tests {
         assert_eq!(deserialized.transport.command(), Some(&"npx".to_string()));
     }
 
+    #[test]
+    fn test_montygate_config_with_retry_in_json() {
+        let json = serde_json::json!({
+            "server": {"name": "test", "version": "1.0.0"},
+            "retry": {
+                "max_retries": 5,
+                "retry_base_delay_ms": 200,
+                "connection_timeout_secs": 15,
+                "request_timeout_secs": 45
+            }
+        });
+        let config: MontygateConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(config.retry.max_retries, 5);
+        assert_eq!(config.retry.retry_base_delay_ms, 200);
+    }
+
     // === MontygateConfig full round-trip ===
 
     #[test]
@@ -901,6 +971,7 @@ mod tests {
             }],
             limits: ResourceLimits::default(),
             policy: PolicyConfig::default(),
+            retry: RetryConfig::default(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: MontygateConfig = serde_json::from_str(&json).unwrap();

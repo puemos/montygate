@@ -21,7 +21,8 @@ pub use registry::{ToolId, ToolRegistry, ToolRoute};
 pub use types::{
     ExecutionResult, ExecutionSnapshot, ExecutionState, ExecutionStats, ExternalCall,
     MontygateConfig, MontygateError, PolicyAction, PolicyConfig, PolicyRule, ResourceLimits,
-    Result, RunProgramInput, ServerConfig, ToolCall, ToolCallId, ToolDefinition, TransportConfig,
+    Result, RetryConfig, RunProgramInput, ServerConfig, ToolCall, ToolCallId, ToolDefinition,
+    TransportConfig,
 };
 
 /// Version of the montygate-core crate

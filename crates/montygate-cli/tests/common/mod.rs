@@ -130,6 +130,7 @@ pub fn write_test_config(dir: &tempfile::TempDir) -> std::path::PathBuf {
         servers: vec![],
         limits: ResourceLimits::default(),
         policy: PolicyConfig::default(),
+        retry: Default::default(),
     };
 
     let path = dir.path().join("config.toml");
@@ -155,6 +156,7 @@ pub fn write_config_with_servers(dir: &tempfile::TempDir) -> std::path::PathBuf 
         }],
         limits: ResourceLimits::default(),
         policy: PolicyConfig::default(),
+        retry: Default::default(),
     };
 
     let path = dir.path().join("config.toml");
