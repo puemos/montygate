@@ -1704,6 +1704,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "futures",
  "governor",
  "mockall",
  "monty",

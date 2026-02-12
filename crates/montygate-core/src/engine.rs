@@ -230,6 +230,18 @@ struct ToolCallRequest {
     response_tx: oneshot::Sender<std::result::Result<serde_json::Value, String>>,
 }
 
+/// A batch of tool call requests for parallel dispatch.
+struct BatchToolCallRequest {
+    calls: Vec<(String, serde_json::Value)>,
+    response_tx: oneshot::Sender<Vec<std::result::Result<serde_json::Value, String>>>,
+}
+
+/// Messages sent from the Monty blocking thread to the async dispatcher.
+enum ToolCallMessage {
+    Single(ToolCallRequest),
+    Batch(BatchToolCallRequest),
+}
+
 /// Real execution engine backed by Monty (RustPython-based sandboxed interpreter).
 ///
 /// Runs Python code with a single registered external function `tool(name, ...)`.
@@ -291,6 +303,69 @@ impl MontyEngine {
 
         Ok((tool_name, tool_args))
     }
+
+    /// Parse batch_tools arguments from Monty's FunctionCall args.
+    ///
+    /// Convention: `batch_tools([(name, args_dict), ...])`
+    /// - args[0] = list of (name, args_dict) tuples
+    fn parse_batch_tool_args(
+        args: &[MontyObject],
+    ) -> std::result::Result<Vec<(String, serde_json::Value)>, String> {
+        let list = match args.first() {
+            Some(MontyObject::List(items)) => items,
+            Some(MontyObject::Tuple(items)) => items,
+            Some(other) => {
+                return Err(format!(
+                    "batch_tools() argument must be a list of (name, args) tuples, got: {}",
+                    other.py_repr()
+                ));
+            }
+            None => {
+                return Err(
+                    "batch_tools() requires one argument: a list of (name, args) tuples"
+                        .to_string(),
+                );
+            }
+        };
+
+        let mut calls = Vec::with_capacity(list.len());
+        for (i, item) in list.iter().enumerate() {
+            let tuple_items = match item {
+                MontyObject::Tuple(items) | MontyObject::List(items) => items,
+                other => {
+                    return Err(format!(
+                        "batch_tools() item {} must be a (name, args) tuple, got: {}",
+                        i,
+                        other.py_repr()
+                    ));
+                }
+            };
+
+            if tuple_items.len() != 2 {
+                return Err(format!(
+                    "batch_tools() item {} must have exactly 2 elements (name, args), got {}",
+                    i,
+                    tuple_items.len()
+                ));
+            }
+
+            let name = match &tuple_items[0] {
+                MontyObject::String(s) => s.clone(),
+                other => {
+                    return Err(format!(
+                        "batch_tools() item {} name must be a string, got: {}",
+                        i,
+                        other.py_repr()
+                    ));
+                }
+            };
+
+            let args_value = crate::convert::monty_to_json(&tuple_items[1]);
+            calls.push((name, args_value));
+        }
+
+        Ok(calls)
+    }
 }
 
 #[async_trait::async_trait]
@@ -315,7 +390,7 @@ impl ExecutionEngine for MontyEngine {
         info!("Starting Monty execution");
 
         // Channel for tool call requests from the blocking Monty thread
-        let (call_tx, mut call_rx) = mpsc::channel::<ToolCallRequest>(1);
+        let (call_tx, mut call_rx) = mpsc::channel::<ToolCallMessage>(1);
 
         // Build monty resource limits
         let monty_limits = monty::ResourceLimits {
@@ -329,41 +404,90 @@ impl ExecutionEngine for MontyEngine {
         };
 
         let code = input.code.clone();
+        let inputs = input.inputs.clone();
 
         // Spawn the Monty interpreter in a blocking thread
         let monty_handle = tokio::task::spawn_blocking(move || {
-            run_monty_blocking(&code, monty_limits, max_external_calls, call_tx)
+            run_monty_blocking(&code, monty_limits, max_external_calls, call_tx, inputs)
         });
 
         // Async side: dispatch tool calls as they come in from the Monty thread
         let mut trace = Vec::new();
-        while let Some(req) = call_rx.recv().await {
-            let call_start = Instant::now();
-            debug!("Dispatching tool call: {}", req.tool_name);
+        while let Some(msg) = call_rx.recv().await {
+            match msg {
+                ToolCallMessage::Single(req) => {
+                    let call_start = Instant::now();
+                    debug!("Dispatching tool call: {}", req.tool_name);
 
-            let parts: Vec<&str> = req.tool_name.split('.').collect();
-            let (server, tool) = if parts.len() >= 2 {
-                (parts[0].to_string(), parts[1..].join("."))
-            } else {
-                ("unknown".to_string(), req.tool_name.clone())
-            };
+                    let parts: Vec<&str> = req.tool_name.split('.').collect();
+                    let (server, tool) = if parts.len() >= 2 {
+                        (parts[0].to_string(), parts[1..].join("."))
+                    } else {
+                        ("unknown".to_string(), req.tool_name.clone())
+                    };
 
-            match dispatcher.dispatch(&req.tool_name, req.args.clone()).await {
-                Ok(result) => {
-                    let duration = call_start.elapsed().as_millis() as u64;
-                    let call =
-                        ToolCall::new(server, tool, req.args).with_result(result.clone(), duration);
-                    trace.push(call);
-                    // Send result back to Monty thread; ignore error if receiver dropped
-                    let _ = req.response_tx.send(Ok(result));
+                    match dispatcher.dispatch(&req.tool_name, req.args.clone()).await {
+                        Ok(result) => {
+                            let duration = call_start.elapsed().as_millis() as u64;
+                            let call = ToolCall::new(server, tool, req.args)
+                                .with_result(result.clone(), duration);
+                            trace.push(call);
+                            let _ = req.response_tx.send(Ok(result));
+                        }
+                        Err(e) => {
+                            let duration = call_start.elapsed().as_millis() as u64;
+                            let err_str = e.to_string();
+                            let call = ToolCall::new(server, tool, req.args)
+                                .with_error(err_str.clone(), duration);
+                            trace.push(call);
+                            let _ = req.response_tx.send(Err(err_str));
+                        }
+                    }
                 }
-                Err(e) => {
-                    let duration = call_start.elapsed().as_millis() as u64;
-                    let err_str = e.to_string();
-                    let call =
-                        ToolCall::new(server, tool, req.args).with_error(err_str.clone(), duration);
-                    trace.push(call);
-                    let _ = req.response_tx.send(Err(err_str));
+                ToolCallMessage::Batch(batch) => {
+                    debug!("Dispatching batch of {} tool calls", batch.calls.len());
+
+                    let results = futures::future::join_all(
+                        batch.calls.iter().map(|(name, args)| {
+                            let d = dispatcher.clone();
+                            let name = name.clone();
+                            let args = args.clone();
+                            async move { d.dispatch(&name, args).await }
+                        }),
+                    )
+                    .await;
+
+                    // Record each call in the trace
+                    for (i, result) in results.iter().enumerate() {
+                        let (name, args) = &batch.calls[i];
+                        let parts: Vec<&str> = name.split('.').collect();
+                        let (server, tool) = if parts.len() >= 2 {
+                            (parts[0].to_string(), parts[1..].join("."))
+                        } else {
+                            ("unknown".to_string(), name.clone())
+                        };
+
+                        match result {
+                            Ok(value) => {
+                                let call = ToolCall::new(server, tool, args.clone())
+                                    .with_result(value.clone(), 0);
+                                trace.push(call);
+                            }
+                            Err(e) => {
+                                let call = ToolCall::new(server, tool, args.clone())
+                                    .with_error(e.to_string(), 0);
+                                trace.push(call);
+                            }
+                        }
+                    }
+
+                    // Convert to the response format
+                    let response: Vec<std::result::Result<serde_json::Value, String>> = results
+                        .into_iter()
+                        .map(|r| r.map_err(|e| e.to_string()))
+                        .collect();
+
+                    let _ = batch.response_tx.send(response);
                 }
             }
         }
@@ -485,14 +609,23 @@ fn run_monty_blocking(
     code: &str,
     limits: monty::ResourceLimits,
     max_external_calls: usize,
-    call_tx: mpsc::Sender<ToolCallRequest>,
+    call_tx: mpsc::Sender<ToolCallMessage>,
+    inputs: HashMap<String, serde_json::Value>,
 ) -> MontyBlockingResult {
     let start = Instant::now();
 
-    // Register "tool" as the single external function
-    let ext_fns = vec!["tool".to_string()];
+    // Register external functions: "tool" for single calls, "batch_tools" for parallel
+    let ext_fns = vec!["tool".to_string(), "batch_tools".to_string()];
 
-    let runner = match MontyRun::new(code.to_string(), "program.py", vec![], ext_fns) {
+    // Build input names/values from the HashMap (sorted keys for deterministic order)
+    let mut input_keys: Vec<String> = inputs.keys().cloned().collect();
+    input_keys.sort();
+    let input_values: Vec<MontyObject> = input_keys
+        .iter()
+        .map(|k| crate::convert::json_to_monty(&inputs[k]))
+        .collect();
+
+    let runner = match MontyRun::new(code.to_string(), "program.py", input_keys, ext_fns) {
         Ok(r) => r,
         Err(e) => {
             return MontyBlockingResult {
@@ -508,7 +641,7 @@ fn run_monty_blocking(
     let tracker = LimitedTracker::new(limits);
     let mut print = CollectStringPrint::new();
 
-    let mut progress = match runner.start(vec![], tracker, &mut print) {
+    let mut progress = match runner.start(input_values, tracker, &mut print) {
         Ok(p) => p,
         Err(e) => {
             return MontyBlockingResult {
@@ -542,61 +675,208 @@ fn run_monty_blocking(
                 call_id: _,
                 state,
             } => {
-                // Should only be "tool" since that's the only registered function
-                if function_name != "tool" {
-                    let err = MontyException::new(
-                        ExcType::NameError,
-                        Some(format!("Unknown function: {function_name}")),
-                    );
-                    match state.run(ExternalResult::Error(err), &mut print) {
-                        Ok(p) => {
-                            progress = p;
-                            continue;
+                let ext_result = match function_name.as_str() {
+                    "tool" => {
+                        // Check external call limit
+                        external_calls += 1;
+                        if external_calls > max_external_calls {
+                            let err = MontyException::new(
+                                ExcType::RuntimeError,
+                                Some(format!(
+                                    "External call limit exceeded ({} calls, max: {})",
+                                    external_calls, max_external_calls
+                                )),
+                            );
+                            match state.run(ExternalResult::Error(err), &mut print) {
+                                Ok(p) => {
+                                    progress = p;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    return MontyBlockingResult {
+                                        success: false,
+                                        result: serde_json::Value::Null,
+                                        stdout: print.output().to_string(),
+                                        error: Some(format_exception(&e)),
+                                        execution_time_ms: start.elapsed().as_millis() as u64,
+                                    };
+                                }
+                            }
                         }
-                        Err(e) => {
+
+                        // Parse tool name and arguments
+                        let (tool_name, tool_args) =
+                            match MontyEngine::parse_tool_call(&args, &kwargs) {
+                                Ok(parsed) => parsed,
+                                Err(err_msg) => {
+                                    let err =
+                                        MontyException::new(ExcType::TypeError, Some(err_msg));
+                                    match state.run(ExternalResult::Error(err), &mut print) {
+                                        Ok(p) => {
+                                            progress = p;
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            return MontyBlockingResult {
+                                                success: false,
+                                                result: serde_json::Value::Null,
+                                                stdout: print.output().to_string(),
+                                                error: Some(format_exception(&e)),
+                                                execution_time_ms: start.elapsed().as_millis()
+                                                    as u64,
+                                            };
+                                        }
+                                    }
+                                }
+                            };
+
+                        // Create a oneshot channel for the response
+                        let (resp_tx, resp_rx) = oneshot::channel();
+
+                        let request = ToolCallRequest {
+                            tool_name: tool_name.clone(),
+                            args: tool_args,
+                            response_tx: resp_tx,
+                        };
+
+                        // Send the request to the async dispatcher
+                        if call_tx
+                            .blocking_send(ToolCallMessage::Single(request))
+                            .is_err()
+                        {
                             return MontyBlockingResult {
                                 success: false,
                                 result: serde_json::Value::Null,
                                 stdout: print.output().to_string(),
-                                error: Some(format_exception(&e)),
+                                error: Some(
+                                    "Execution cancelled: dispatcher channel closed".to_string(),
+                                ),
                                 execution_time_ms: start.elapsed().as_millis() as u64,
                             };
                         }
-                    }
-                }
 
-                // Check external call limit
-                external_calls += 1;
-                if external_calls > max_external_calls {
-                    let err = MontyException::new(
-                        ExcType::RuntimeError,
-                        Some(format!(
-                            "External call limit exceeded ({} calls, max: {})",
-                            external_calls, max_external_calls
-                        )),
-                    );
-                    match state.run(ExternalResult::Error(err), &mut print) {
-                        Ok(p) => {
-                            progress = p;
-                            continue;
+                        // Wait for the response
+                        match resp_rx.blocking_recv() {
+                            Ok(Ok(value)) => {
+                                ExternalResult::Return(crate::convert::json_to_monty(&value))
+                            }
+                            Ok(Err(err_msg)) => ExternalResult::Error(MontyException::new(
+                                ExcType::RuntimeError,
+                                Some(format!("Tool call failed: {err_msg}")),
+                            )),
+                            Err(_) => ExternalResult::Error(MontyException::new(
+                                ExcType::RuntimeError,
+                                Some(
+                                    "Tool call cancelled: response channel closed".to_string(),
+                                ),
+                            )),
                         }
-                        Err(e) => {
+                    }
+                    "batch_tools" => {
+                        // Parse the batch arguments
+                        let calls = match MontyEngine::parse_batch_tool_args(&args) {
+                            Ok(calls) => calls,
+                            Err(err_msg) => {
+                                let err = MontyException::new(ExcType::TypeError, Some(err_msg));
+                                match state.run(ExternalResult::Error(err), &mut print) {
+                                    Ok(p) => {
+                                        progress = p;
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        return MontyBlockingResult {
+                                            success: false,
+                                            result: serde_json::Value::Null,
+                                            stdout: print.output().to_string(),
+                                            error: Some(format_exception(&e)),
+                                            execution_time_ms: start.elapsed().as_millis() as u64,
+                                        };
+                                    }
+                                }
+                            }
+                        };
+
+                        // Count all individual calls against the limit
+                        external_calls += calls.len();
+                        if external_calls > max_external_calls {
+                            let err = MontyException::new(
+                                ExcType::RuntimeError,
+                                Some(format!(
+                                    "External call limit exceeded ({} calls, max: {})",
+                                    external_calls, max_external_calls
+                                )),
+                            );
+                            match state.run(ExternalResult::Error(err), &mut print) {
+                                Ok(p) => {
+                                    progress = p;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    return MontyBlockingResult {
+                                        success: false,
+                                        result: serde_json::Value::Null,
+                                        stdout: print.output().to_string(),
+                                        error: Some(format_exception(&e)),
+                                        execution_time_ms: start.elapsed().as_millis() as u64,
+                                    };
+                                }
+                            }
+                        }
+
+                        let (resp_tx, resp_rx) = oneshot::channel();
+
+                        let batch_request = BatchToolCallRequest {
+                            calls,
+                            response_tx: resp_tx,
+                        };
+
+                        if call_tx
+                            .blocking_send(ToolCallMessage::Batch(batch_request))
+                            .is_err()
+                        {
                             return MontyBlockingResult {
                                 success: false,
                                 result: serde_json::Value::Null,
                                 stdout: print.output().to_string(),
-                                error: Some(format_exception(&e)),
+                                error: Some(
+                                    "Execution cancelled: dispatcher channel closed".to_string(),
+                                ),
                                 execution_time_ms: start.elapsed().as_millis() as u64,
                             };
                         }
-                    }
-                }
 
-                // Parse tool name and arguments
-                let (tool_name, tool_args) = match MontyEngine::parse_tool_call(&args, &kwargs) {
-                    Ok(parsed) => parsed,
-                    Err(err_msg) => {
-                        let err = MontyException::new(ExcType::TypeError, Some(err_msg));
+                        // Wait for batch response and convert to MontyObject::List
+                        match resp_rx.blocking_recv() {
+                            Ok(results) => {
+                                let items: Vec<MontyObject> = results
+                                    .into_iter()
+                                    .map(|r| match r {
+                                        Ok(value) => crate::convert::json_to_monty(&value),
+                                        Err(err_msg) => {
+                                            let pairs: Vec<(MontyObject, MontyObject)> = vec![(
+                                                MontyObject::String("error".to_string()),
+                                                MontyObject::String(err_msg),
+                                            )];
+                                            MontyObject::Dict(pairs.into())
+                                        }
+                                    })
+                                    .collect();
+                                ExternalResult::Return(MontyObject::List(items))
+                            }
+                            Err(_) => ExternalResult::Error(MontyException::new(
+                                ExcType::RuntimeError,
+                                Some(
+                                    "Batch tool call cancelled: response channel closed"
+                                        .to_string(),
+                                ),
+                            )),
+                        }
+                    }
+                    _ => {
+                        let err = MontyException::new(
+                            ExcType::NameError,
+                            Some(format!("Unknown function: {function_name}")),
+                        );
                         match state.run(ExternalResult::Error(err), &mut print) {
                             Ok(p) => {
                                 progress = p;
@@ -613,42 +893,6 @@ fn run_monty_blocking(
                             }
                         }
                     }
-                };
-
-                // Create a oneshot channel for the response
-                let (resp_tx, resp_rx) = oneshot::channel();
-
-                let request = ToolCallRequest {
-                    tool_name: tool_name.clone(),
-                    args: tool_args,
-                    response_tx: resp_tx,
-                };
-
-                // Send the request to the async dispatcher
-                if call_tx.blocking_send(request).is_err() {
-                    // Async side dropped — abort execution
-                    return MontyBlockingResult {
-                        success: false,
-                        result: serde_json::Value::Null,
-                        stdout: print.output().to_string(),
-                        error: Some("Execution cancelled: dispatcher channel closed".to_string()),
-                        execution_time_ms: start.elapsed().as_millis() as u64,
-                    };
-                }
-
-                // Wait for the response
-                let ext_result = match resp_rx.blocking_recv() {
-                    Ok(Ok(value)) => {
-                        ExternalResult::Return(crate::convert::json_to_monty(&value))
-                    }
-                    Ok(Err(err_msg)) => ExternalResult::Error(MontyException::new(
-                        ExcType::RuntimeError,
-                        Some(format!("Tool call failed: {err_msg}")),
-                    )),
-                    Err(_) => ExternalResult::Error(MontyException::new(
-                        ExcType::RuntimeError,
-                        Some("Tool call cancelled: response channel closed".to_string()),
-                    )),
                 };
 
                 match state.run(ext_result, &mut print) {
@@ -1162,5 +1406,218 @@ mod tests {
         let engine = Arc::new(MockEngine::default());
         let manager = EngineManager::new(engine);
         assert!(manager.validate("x = 1").is_ok());
+    }
+
+    // === MontyEngine: input injection ===
+
+    #[tokio::test]
+    async fn test_monty_engine_input_injection_pure_computation() {
+        let engine = MontyEngine::default();
+        let dispatcher = SimpleDispatcher::new();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("x".to_string(), serde_json::json!(10));
+        inputs.insert("y".to_string(), serde_json::json!(20));
+
+        let input = RunProgramInput {
+            code: "result = x + y\nprint(result)".to_string(),
+            inputs,
+            type_check: true,
+        };
+
+        let result = engine
+            .execute(input, Arc::new(dispatcher))
+            .await
+            .unwrap();
+
+        assert_eq!(result.stdout.trim(), "30");
+    }
+
+    #[tokio::test]
+    async fn test_monty_engine_input_injection_with_tool_call() {
+        let engine = MontyEngine::default();
+        let mut dispatcher = SimpleDispatcher::new();
+        dispatcher.register("test.echo", |args| Ok(args));
+
+        let mut inputs = HashMap::new();
+        inputs.insert("msg".to_string(), serde_json::json!("hello"));
+
+        let input = RunProgramInput {
+            code: r#"result = tool("test.echo", {"message": msg})"#.to_string(),
+            inputs,
+            type_check: true,
+        };
+
+        let result = engine
+            .execute(input, Arc::new(dispatcher))
+            .await
+            .unwrap();
+
+        assert_eq!(result.trace.len(), 1);
+        assert_eq!(result.trace[0].arguments["message"], "hello");
+    }
+
+    #[tokio::test]
+    async fn test_monty_engine_empty_inputs_backward_compat() {
+        let engine = MontyEngine::default();
+        let dispatcher = SimpleDispatcher::new();
+
+        let input = RunProgramInput {
+            code: "result = 42\nprint(result)".to_string(),
+            inputs: HashMap::new(),
+            type_check: true,
+        };
+
+        let result = engine
+            .execute(input, Arc::new(dispatcher))
+            .await
+            .unwrap();
+
+        assert_eq!(result.stdout.trim(), "42");
+    }
+
+    // === parse_batch_tool_args ===
+
+    #[test]
+    fn test_parse_batch_tool_args_valid() {
+        let args = vec![MontyObject::List(vec![
+            MontyObject::Tuple(vec![
+                MontyObject::String("github.list_issues".to_string()),
+                MontyObject::Dict(
+                    vec![(
+                        MontyObject::String("repo".to_string()),
+                        MontyObject::String("foo".to_string()),
+                    )]
+                    .into(),
+                ),
+            ]),
+            MontyObject::Tuple(vec![
+                MontyObject::String("github.list_issues".to_string()),
+                MontyObject::Dict(
+                    vec![(
+                        MontyObject::String("repo".to_string()),
+                        MontyObject::String("bar".to_string()),
+                    )]
+                    .into(),
+                ),
+            ]),
+        ])];
+
+        let result = MontyEngine::parse_batch_tool_args(&args).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "github.list_issues");
+        assert_eq!(result[0].1["repo"], "foo");
+        assert_eq!(result[1].0, "github.list_issues");
+        assert_eq!(result[1].1["repo"], "bar");
+    }
+
+    #[test]
+    fn test_parse_batch_tool_args_empty_list() {
+        let args = vec![MontyObject::List(vec![])];
+        let result = MontyEngine::parse_batch_tool_args(&args).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_batch_tool_args_no_args() {
+        let args: Vec<MontyObject> = vec![];
+        let result = MontyEngine::parse_batch_tool_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_batch_tool_args_not_a_list() {
+        let args = vec![MontyObject::String("not a list".to_string())];
+        let result = MontyEngine::parse_batch_tool_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_batch_tool_args_item_not_tuple() {
+        let args = vec![MontyObject::List(vec![MontyObject::String(
+            "not a tuple".to_string(),
+        )])];
+        let result = MontyEngine::parse_batch_tool_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_batch_tool_args_item_wrong_length() {
+        let args = vec![MontyObject::List(vec![MontyObject::Tuple(vec![
+            MontyObject::String("name".to_string()),
+        ])])];
+        let result = MontyEngine::parse_batch_tool_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_batch_tool_args_name_not_string() {
+        let args = vec![MontyObject::List(vec![MontyObject::Tuple(vec![
+            MontyObject::Int(42),
+            MontyObject::Dict(vec![].into()),
+        ])])];
+        let result = MontyEngine::parse_batch_tool_args(&args);
+        assert!(result.is_err());
+    }
+
+    // === MontyEngine: batch_tools execution ===
+
+    #[tokio::test]
+    async fn test_monty_engine_batch_tools_execution() {
+        let engine = MontyEngine::default();
+        let mut dispatcher = SimpleDispatcher::new();
+        dispatcher.register("test.echo", |args| Ok(args));
+
+        let input = RunProgramInput {
+            code: r#"
+results = batch_tools([
+    ("test.echo", {"msg": "hello"}),
+    ("test.echo", {"msg": "world"}),
+])
+print(len(results))
+"#
+            .to_string(),
+            inputs: HashMap::new(),
+            type_check: true,
+        };
+
+        let result = engine
+            .execute(input, Arc::new(dispatcher))
+            .await
+            .unwrap();
+
+        assert_eq!(result.stdout.trim(), "2");
+        assert_eq!(result.trace.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_monty_engine_mixed_serial_and_batch() {
+        let engine = MontyEngine::default();
+        let mut dispatcher = SimpleDispatcher::new();
+        dispatcher.register("test.echo", |args| Ok(args));
+
+        let input = RunProgramInput {
+            code: r#"
+r1 = tool("test.echo", {"msg": "first"})
+results = batch_tools([
+    ("test.echo", {"msg": "a"}),
+    ("test.echo", {"msg": "b"}),
+])
+r2 = tool("test.echo", {"msg": "last"})
+print("done")
+"#
+            .to_string(),
+            inputs: HashMap::new(),
+            type_check: true,
+        };
+
+        let result = engine
+            .execute(input, Arc::new(dispatcher))
+            .await
+            .unwrap();
+
+        assert_eq!(result.stdout.trim(), "done");
+        // 1 single + 2 batch + 1 single = 4 calls total
+        assert_eq!(result.trace.len(), 4);
     }
 }
