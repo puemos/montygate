@@ -171,7 +171,7 @@ impl ToolRegistry {
         let mut all_stubs = String::new();
         all_stubs.push_str("# Auto-generated Monty stubs\n\n");
         all_stubs.push_str("from typing import Any\n\n");
-        all_stubs.push_str("async def tool(name: str, **kwargs: Any) -> Any:\n");
+        all_stubs.push_str("def tool(name: str, **kwargs: Any) -> Any:\n");
         all_stubs.push_str("    \"\"\"Call a tool by name.\"\"\"\n");
         all_stubs.push_str("    ...\n\n");
         all_stubs.push_str("# Available tools:\n\n");
@@ -557,7 +557,7 @@ mod tests {
 
         let all = registry.get_all_stubs();
         assert!(all.contains("Auto-generated Monty stubs"));
-        assert!(all.contains("async def tool"));
+        assert!(all.contains("def tool"));
         assert!(all.contains("=== srv1 ==="));
         assert!(all.contains("=== srv2 ==="));
     }

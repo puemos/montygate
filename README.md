@@ -51,15 +51,15 @@ Instead of 5 sequential tool calls (50K+ tokens), the LLM writes one `run_progra
 
 ```python
 # Single run_program call replaces 3 round-trips
-transcript = await tool("gdrive.get_document", document_id="abc123")
+transcript = tool("gdrive.get_document", document_id="abc123")
 summary = transcript[:500]
 
-await tool("salesforce.update_record",
+tool("salesforce.update_record",
     object_type="Lead",
     record_id="xyz",
     data={"notes": summary})
 
-await tool("slack.post_message",
+tool("slack.post_message",
     channel="#sales",
     text=f"Updated lead with {len(transcript)} char transcript")
 ```
@@ -220,19 +220,19 @@ Now instead of 3 separate tool calls, the LLM writes a single `run_program`:
 
 ```python
 # Fetch a webpage, extract key facts, and store them in memory
-page = await tool("fetch.fetch", url="https://modelcontextprotocol.io")
+page = tool("fetch.fetch", url="https://modelcontextprotocol.io")
 summary = page[:1000]
 
 # Save to the knowledge graph
-await tool("memory.create_entities", entities=[
+tool("memory.create_entities", entities=[
     {"name": "MCP", "entityType": "Protocol", "observations": [summary]}
 ])
 
 # Verify it was stored
-result = await tool("memory.read_graph")
+result = tool("memory.read_graph")
 
 # Use the echo tool to confirm
-await tool("everything.echo", message=f"Stored {len(result)} entities")
+tool("everything.echo", message=f"Stored {len(result)} entities")
 ```
 
 **3 servers, 4 tool calls, 1 round-trip.** Without MontyGate this would cost 4 separate LLM turns and ~40K extra tokens.
@@ -268,7 +268,7 @@ montygate/
 |-----------|---------|
 | **Tool Registry** | Discovers and namespaces tools from downstream servers (`server.tool_name`). Auto-generates Python type stubs from JSON schemas. |
 | **Policy Engine** | Per-tool allow/deny/require-approval rules with wildcard patterns (`*.delete_*`) and rate limiting (`10/min`). |
-| **Execution Engine** | Trait-based abstraction. Ships with `MockEngine` for testing; designed for pluggable Monty interpreter integration. |
+| **Execution Engine** | Trait-based abstraction. Ships with `MontyEngine` (real sandboxed Python execution via Monty) and `MockEngine` for testing. |
 | **Bridge** | Connects code execution to MCP tool dispatch. Resolves tools, checks policies, dispatches calls, and records execution traces. |
 | **MCP Server** | Exposes the single `run_program` tool via the [Model Context Protocol](https://modelcontextprotocol.io). |
 
@@ -446,12 +446,12 @@ cargo tarpaulin           # Coverage report
 - [x] Core architecture with trait-based engine design
 - [x] Tool registry with Python stub generation from JSON schemas
 - [x] Policy engine with wildcard patterns and rate limiting
+- [x] MontyEngine with real Python execution via Monty interpreter
 - [x] Mock execution engine for testing
 - [x] MCP server with `run_program` tool via rmcp
 - [x] CLI with server management and config commands
 - [x] Comprehensive test suite (256 tests)
 - [ ] Full rmcp client integration for downstream tool calls
-- [ ] Monty Python interpreter integration
 - [ ] Human-in-the-loop approval workflow
 - [ ] Snapshot-based execution persistence (pause/resume)
 - [ ] SSE and streamable HTTP transport support
