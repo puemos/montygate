@@ -1,4 +1,4 @@
-import type { z } from "zod";
+import { z } from "zod";
 import { detectFormat } from "./detect.js";
 import {
   type AnyToolDefinition,
@@ -14,6 +14,7 @@ import type {
   ToolOptions,
   TraceEntry,
 } from "./types.js";
+import { unwrapExecutionResult } from "./adapters/utils.js";
 
 /**
  * Binding types from the native NAPI module.
@@ -379,6 +380,158 @@ export class Montygate {
   getSearchToolInputSchema(): Record<string, unknown> {
     return this.native.getSearchToolInputSchema() as Record<string, unknown>;
   }
+
+  // --- LLM adapter methods ---
+
+  /**
+   * Get Anthropic-compatible tool definitions.
+   * Returns [execute, search] tools for use with the Anthropic SDK.
+   */
+  anthropic(): AnthropicTool[] {
+    const execSchema = this.getExecuteToolInputSchema();
+    const searchSchema = this.getSearchToolInputSchema();
+    return [
+      {
+        name: "execute",
+        description: this.getExecuteToolDescription(),
+        input_schema: execSchema as AnthropicTool["input_schema"],
+      },
+      {
+        name: "search",
+        description: this.getSearchToolDescription(),
+        input_schema: searchSchema as AnthropicTool["input_schema"],
+      },
+    ];
+  }
+
+  /**
+   * Get OpenAI-compatible tool definitions.
+   * Returns [execute, search] function tools for use with the OpenAI SDK.
+   */
+  openai(): OpenAITool[] {
+    const execSchema = this.getExecuteToolInputSchema();
+    const searchSchema = this.getSearchToolInputSchema();
+    return [
+      {
+        type: "function",
+        function: {
+          name: "execute",
+          description: this.getExecuteToolDescription(),
+          parameters: execSchema as OpenAITool["function"]["parameters"],
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "search",
+          description: this.getSearchToolDescription(),
+          parameters: searchSchema as OpenAITool["function"]["parameters"],
+        },
+      },
+    ];
+  }
+
+  /**
+   * Get Vercel AI SDK-compatible tool definitions.
+   * Returns { execute, search } for use with generateText() / streamText().
+   */
+  vercelai(): Record<string, VercelAIToolDef> {
+    return {
+      execute: {
+        description: this.getExecuteToolDescription(),
+        parameters: z.object({
+          code: z.string().describe("Python script to execute"),
+          inputs: z
+            .record(z.unknown())
+            .optional()
+            .describe("Variables to inject into the script"),
+        }),
+        execute: async (args) => {
+          const result = await this.execute(
+            args.code as string,
+            args.inputs as Record<string, unknown> | undefined,
+          );
+          return unwrapExecutionResult(result);
+        },
+      },
+      search: {
+        description: this.getSearchToolDescription(),
+        parameters: z.object({
+          query: z.string().describe("Search query"),
+          top_k: z.number().optional().describe("Maximum number of results"),
+        }),
+        execute: async (args) => {
+          return this.search(
+            args.query as string,
+            args.top_k as number | undefined,
+          );
+        },
+      },
+    };
+  }
+
+  /**
+   * Handle a tool call from any LLM framework.
+   * Accepts either an object (Anthropic) or a JSON string (OpenAI) as args.
+   */
+  async handleToolCall(
+    name: string,
+    args: Record<string, unknown> | string,
+  ): Promise<unknown> {
+    const input =
+      typeof args === "string"
+        ? (JSON.parse(args) as Record<string, unknown>)
+        : args;
+
+    if (name === "execute") {
+      const result = await this.execute(
+        input.code as string,
+        input.inputs as Record<string, unknown> | undefined,
+      );
+      return unwrapExecutionResult(result);
+    } else if (name === "search") {
+      return this.search(
+        input.query as string,
+        input.top_k as number | undefined,
+      );
+    }
+    throw new Error(`Unknown tool: ${name}`);
+  }
+}
+
+/** Anthropic tool format (for use with the Anthropic SDK). */
+export interface AnthropicTool {
+  name: string;
+  description: string;
+  input_schema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
+/** OpenAI function tool format. */
+export interface OpenAITool {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: "object";
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+  };
+}
+
+/**
+ * Vercel AI SDK tool definition shape.
+ * Compatible with the `tool()` helper from `ai` package.
+ */
+export interface VercelAIToolDef {
+  description: string;
+  parameters: z.ZodType;
+  execute: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
 function mapTraceEntry(entry: NativeTraceEntry): TraceEntry {

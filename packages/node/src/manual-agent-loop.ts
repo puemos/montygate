@@ -11,7 +11,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { handleAnthropicToolCall, Montygate, toAnthropic } from "./index.js";
+import { Montygate } from "./index.js";
 
 // ── Setup ──────────────────────────────────────────────────────────────────
 
@@ -100,7 +100,7 @@ gate.tool("get_weather", {
 
 // ── Agent loop ─────────────────────────────────────────────────────────────
 
-const tools = toAnthropic(gate) as Anthropic.Messages.Tool[];
+const tools = gate.anthropic() as Anthropic.Messages.Tool[];
 
 async function agentLoop(userMessage: string) {
   console.log(`\n${"=".repeat(70)}`);
@@ -156,8 +156,7 @@ async function agentLoop(userMessage: string) {
         console.log(`  Input: ${JSON.stringify(block.input, null, 2)}`);
 
         try {
-          const result = await handleAnthropicToolCall(
-            gate,
+          const result = await gate.handleToolCall(
             block.name,
             block.input as Record<string, unknown>,
           );
