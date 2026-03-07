@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { Montygate } from "./engine.js";
-import { toAnthropic, handleAnthropicToolCall } from "./adapters/anthropic.js";
-import { toOpenAI, handleOpenAIToolCall } from "./adapters/openai.js";
+import { handleAnthropicToolCall, toAnthropic } from "./adapters/anthropic.js";
+import { handleOpenAIToolCall, toOpenAI } from "./adapters/openai.js";
 import { toVercelAI } from "./adapters/vercel-ai.js";
+import { Montygate } from "./engine.js";
+import type { ToolHandlerMap } from "./normalize.js";
 
 /**
  * End-to-end tests exercising the full vertical slice:
@@ -66,9 +67,7 @@ notification = tool('send_email', to=order['email'], body='Ticket ' + ticket['ti
     expect(output.ticket.customer_email).toBe("alice@example.com");
     expect(output.notification.sent).toBe(true);
     expect(output.notification.to).toBe("alice@example.com");
-    expect(output.notification.body).toBe(
-      "Ticket TKT-100 created for TR-789",
-    );
+    expect(output.notification.body).toBe("Ticket TKT-100 created for TR-789");
 
     // All 3 tool calls traced
     expect(result.trace).toHaveLength(3);
@@ -131,7 +130,8 @@ describe("e2e: input injection", () => {
 
     gate.tool("process", {
       params: z.object({ items: z.array(z.number()) }),
-      run: async ({ items }) => items.reduce((a: number, b: number) => a + b, 0),
+      run: async ({ items }) =>
+        items.reduce((a: number, b: number) => a + b, 0),
     });
 
     const result = await gate.execute(`tool('process', items=data['values'])`, {
@@ -314,9 +314,7 @@ describe("e2e: search and catalog", () => {
       description: "Create a customer support ticket",
       params: z.object({
         subject: z.string().describe("Ticket subject line"),
-        priority: z
-          .enum(["low", "medium", "high"])
-          .describe("Ticket priority"),
+        priority: z.enum(["low", "medium", "high"]).describe("Ticket priority"),
       }),
       returns: z.object({ ticket_id: z.string() }),
       run: async () => ({ ticket_id: "TKT-1" }),
@@ -589,5 +587,218 @@ results = batch_tools([
     expect(output).toHaveLength(3);
     expect(output.sort()).toEqual(["A", "B", "C"]);
     expect(result.trace).toHaveLength(3);
+  });
+});
+
+describe("e2e: .tools() universal registration", () => {
+  it("registers OpenAI Chat Completions tools + handlers and executes", async () => {
+    const gate = new Montygate();
+    const openaiTools = [
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "Get weather for a city",
+          parameters: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+          },
+        },
+      },
+    ];
+    const handlers: ToolHandlerMap = {
+      get_weather: async (args: unknown) => {
+        const { city } = args as { city: string };
+        return { city, temp: 72, condition: "sunny" };
+      },
+    };
+
+    gate.tools(openaiTools, handlers);
+    expect(gate.toolCount).toBe(1);
+
+    const result = await gate.execute("tool('get_weather', city='Paris')");
+    const output = result.output as { city: string; temp: number };
+    expect(output.city).toBe("Paris");
+    expect(output.temp).toBe(72);
+  });
+
+  it("registers Anthropic raw tools + handlers and executes", async () => {
+    const gate = new Montygate();
+    const anthropicTools = [
+      {
+        name: "lookup_order",
+        description: "Look up order by ID",
+        input_schema: {
+          type: "object",
+          properties: { order_id: { type: "string" } },
+          required: ["order_id"],
+        },
+      },
+    ];
+    const handlers: ToolHandlerMap = {
+      lookup_order: async (args: unknown) => {
+        const { order_id } = args as { order_id: string };
+        return { id: order_id, status: "shipped" };
+      },
+    };
+
+    gate.tools(anthropicTools, handlers);
+
+    const result = await gate.execute("tool('lookup_order', order_id='ORD-1')");
+    const output = result.output as { id: string; status: string };
+    expect(output.id).toBe("ORD-1");
+    expect(output.status).toBe("shipped");
+  });
+
+  it("registers Vercel AI-style tools (object with embedded execute)", async () => {
+    const gate = new Montygate();
+    const vercelTools = {
+      get_weather: {
+        description: "Get weather",
+        parameters: z.object({ city: z.string() }),
+        execute: async (args: unknown) => {
+          const { city } = args as { city: string };
+          return { city, temp: 22 };
+        },
+      },
+    };
+
+    gate.tools(vercelTools);
+    expect(gate.toolCount).toBe(1);
+
+    const result = await gate.execute("tool('get_weather', city='London')");
+    const output = result.output as { city: string; temp: number };
+    expect(output.city).toBe("London");
+    expect(output.temp).toBe(22);
+  });
+
+  it("chains .tools() from multiple sources", async () => {
+    const gate = new Montygate();
+
+    gate
+      .tools(
+        [
+          {
+            type: "function",
+            function: {
+              name: "tool_a",
+              parameters: { type: "object", properties: {} },
+            },
+          },
+        ],
+        { tool_a: async () => "a_result" },
+      )
+      .tools({
+        tool_b: {
+          description: "Tool B",
+          parameters: z.object({}),
+          execute: async () => "b_result",
+        },
+      });
+
+    expect(gate.toolCount).toBe(2);
+
+    const result = await gate.execute(`
+a = tool('tool_a')
+b = tool('tool_b')
+[a, b]
+    `);
+
+    const output = result.output as string[];
+    expect(output).toEqual(["a_result", "b_result"]);
+  });
+
+  it("registers tools via constructor config", async () => {
+    const openaiTools = [
+      {
+        type: "function",
+        function: {
+          name: "greet",
+          parameters: {
+            type: "object",
+            properties: { name: { type: "string" } },
+            required: ["name"],
+          },
+        },
+      },
+    ];
+
+    const gate = new Montygate({
+      tools: openaiTools,
+      handlers: {
+        greet: async (args: unknown) => {
+          const { name } = args as { name: string };
+          return `Hello, ${name}!`;
+        },
+      },
+    });
+
+    expect(gate.toolCount).toBe(1);
+
+    const result = await gate.execute("tool('greet', name='World')");
+    expect(result.output).toBe("Hello, World!");
+  });
+
+  it("throws clear error when tool has no handler", () => {
+    const gate = new Montygate();
+    const tools = [
+      {
+        type: "function",
+        function: {
+          name: "orphan_tool",
+          parameters: { type: "object" },
+        },
+      },
+    ];
+
+    expect(() => gate.tools(tools)).toThrow(
+      "Tool 'orphan_tool' (detected as openai-chat format) has no handler",
+    );
+  });
+
+  it("throws for unknown tool format", () => {
+    const gate = new Montygate();
+    expect(() => gate.tools([{ random: "shape" }])).toThrow(
+      "Could not detect tool format",
+    );
+  });
+
+  it("mixes .tools() with .tool() on same engine", async () => {
+    const gate = new Montygate();
+
+    // Register via .tools()
+    gate.tools(
+      [
+        {
+          name: "fetch_data",
+          description: "Fetch data",
+          input_schema: {
+            type: "object",
+            properties: { id: { type: "string" } },
+          },
+        },
+      ],
+      {
+        fetch_data: async (args: unknown) => ({
+          id: (args as { id: string }).id,
+          value: 42,
+        }),
+      },
+    );
+
+    // Register via .tool()
+    gate.tool("process_data", {
+      params: z.object({ value: z.number() }),
+      run: async ({ value }) => value * 2,
+    });
+
+    expect(gate.toolCount).toBe(2);
+
+    const result = await gate.execute(`
+data = tool('fetch_data', id='X')
+tool('process_data', value=data['value'])
+    `);
+    expect(result.output).toBe(84);
   });
 });

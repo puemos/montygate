@@ -1,11 +1,17 @@
 import type { z } from "zod";
+import { detectFormat } from "./detect.js";
+import {
+  type AnyToolDefinition,
+  normalizeTool,
+  type ToolHandlerMap,
+} from "./normalize.js";
 import { zodToJsonSchema } from "./schema.js";
 import type {
-  MontygateConfig,
-  ToolOptions,
-  ToolHandle,
   ExecutionResult,
+  MontygateConfig,
   SearchResult,
+  ToolHandle,
+  ToolOptions,
   TraceEntry,
 } from "./types.js";
 
@@ -93,25 +99,36 @@ interface NativeEngineConstructor {
   }): NativeEngine;
 }
 
-// Try to load the native binding (platform-specific .node file).
+// Maps Node.js platform+arch to the NAPI-RS triple suffix used in both:
+//   - published npm package names: montygate-<suffix>
+//   - local .node filenames:       montygate.<suffix>.node
+const triples: Record<string, string> = {
+  "darwin-arm64": "darwin-arm64",
+  "darwin-x64": "darwin-x64",
+  "linux-x64": "linux-x64-gnu",
+  "linux-arm64": "linux-arm64-gnu",
+  "win32-x64": "win32-x64-msvc",
+};
+
+// Try to load the native binding.
+// 1. Published: platform-specific package from optionalDependencies
+// 2. Dev: local .node file built by `napi build --platform`
 let NativeEngineClass: NativeEngineConstructor;
 try {
-  const platform = process.platform;
-  const arch = process.arch;
-  const platformMap: Record<string, string> = {
-    darwin: "darwin",
-    linux: "linux",
-    win32: "win32",
-  };
-  const archMap: Record<string, string> = {
-    x64: "x64",
-    arm64: "arm64",
-  };
-  const p = platformMap[platform] ?? platform;
-  const a = archMap[arch] ?? arch;
-  const bindingPath = `../montygate.${p}-${a}.node`;
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const binding = require(bindingPath);
+  const triple = triples[`${process.platform}-${process.arch}`];
+  if (!triple)
+    throw new Error(
+      `Unsupported platform: ${process.platform}-${process.arch}`,
+    );
+
+  let binding: { NativeEngine: NativeEngineConstructor };
+  try {
+    // Published: montygate-<triple> from npm
+    binding = require(`montygate-${triple}`);
+  } catch {
+    // Dev: local .node file
+    binding = require(`../montygate.${triple}.node`);
+  }
   NativeEngineClass = binding.NativeEngine;
 } catch {
   // Native binding not available — will throw at construction time.
@@ -137,7 +154,7 @@ try {
  */
 export class Montygate {
   private native: NativeEngine;
-  private tools = new Map<string, ToolHandle>();
+  private toolHandles = new Map<string, ToolHandle>();
 
   constructor(config?: MontygateConfig) {
     if (!NativeEngineClass) {
@@ -183,6 +200,10 @@ export class Montygate {
     this.native = new NativeEngineClass(
       Object.keys(nativeConfig).length > 0 ? nativeConfig : undefined,
     ) as NativeEngine;
+
+    if (config?.tools) {
+      this.tools(config.tools, config.handlers);
+    }
   }
 
   /**
@@ -200,7 +221,7 @@ export class Montygate {
       inputSchema,
       outputSchema,
     };
-    this.tools.set(name, handle);
+    this.toolHandles.set(name, handle);
 
     this.native.registerTool(
       {
@@ -211,6 +232,64 @@ export class Montygate {
       },
       options.run as (args: unknown) => Promise<unknown>,
     );
+
+    return this;
+  }
+
+  /**
+   * Register tools from any supported format (OpenAI, Anthropic, Vercel AI, etc.).
+   * Auto-detects the format and normalizes each tool.
+   *
+   * @param defs - Array of tool definitions or object keyed by tool name (Vercel AI style).
+   * @param handlers - Optional map of tool name → async handler for formats without embedded handlers.
+   */
+  tools(
+    defs: AnyToolDefinition[] | Record<string, AnyToolDefinition>,
+    handlers?: ToolHandlerMap,
+  ): this {
+    const entries: Array<{ tool: AnyToolDefinition; keyName?: string }> =
+      Array.isArray(defs)
+        ? defs.map((t) => ({ tool: t }))
+        : Object.entries(defs).map(([key, t]) => ({ tool: t, keyName: key }));
+
+    for (const { tool: rawTool, keyName } of entries) {
+      const format = keyName ? "vercel-ai" : detectFormat(rawTool);
+
+      if (format === "unknown") {
+        throw new Error(
+          `Could not detect tool format. Ensure the tool matches a supported shape (OpenAI, Anthropic, Vercel AI, or OpenAI Agents SDK).`,
+        );
+      }
+
+      const normalized = normalizeTool(rawTool, format, handlers, keyName);
+
+      if (!normalized.handler && !handlers?.[normalized.name]) {
+        throw new Error(
+          `Tool '${normalized.name}' (detected as ${format} format) has no handler. Pass one in the handlers map.`,
+        );
+      }
+
+      // Safe: the guard above ensures at least one is defined.
+      const handler = (normalized.handler ?? handlers?.[normalized.name]) as (
+        args: unknown,
+      ) => Promise<unknown>;
+
+      const handle: ToolHandle = {
+        name: normalized.name,
+        description: normalized.description,
+        inputSchema: normalized.inputSchema,
+      };
+      this.toolHandles.set(normalized.name, handle);
+
+      this.native.registerTool(
+        {
+          name: normalized.name,
+          description: normalized.description,
+          inputSchema: normalized.inputSchema,
+        },
+        handler,
+      );
+    }
 
     return this;
   }
@@ -264,7 +343,7 @@ export class Montygate {
 
   /** Get all registered tool handles. */
   getTools(): ToolHandle[] {
-    return Array.from(this.tools.values());
+    return Array.from(this.toolHandles.values());
   }
 
   /** Get all execution traces. */

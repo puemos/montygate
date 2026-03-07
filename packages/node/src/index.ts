@@ -1,28 +1,34 @@
-export { Montygate } from "./engine.js";
-export { zodToJsonSchema } from "./schema.js";
-
-// Adapters
-export { toAnthropic, handleAnthropicToolCall } from "./adapters/anthropic.js";
 export type { AnthropicTool } from "./adapters/anthropic.js";
-
-export { toOpenAI, handleOpenAIToolCall } from "./adapters/openai.js";
+// Adapters
+export { handleAnthropicToolCall, toAnthropic } from "./adapters/anthropic.js";
 export type { OpenAITool } from "./adapters/openai.js";
-
-export { toVercelAI } from "./adapters/vercel-ai.js";
+export { handleOpenAIToolCall, toOpenAI } from "./adapters/openai.js";
 export type { VercelAIToolDef } from "./adapters/vercel-ai.js";
+export { toVercelAI } from "./adapters/vercel-ai.js";
+// Detection & normalization types
+export type { ToolFormat } from "./detect.js";
+export { detectFormat, isZodSchema } from "./detect.js";
+export { Montygate } from "./engine.js";
+export type {
+  AnyToolDefinition,
+  NormalizedTool,
+  ToolHandlerMap,
+} from "./normalize.js";
+export { normalizeTool } from "./normalize.js";
+export { zodToJsonSchema } from "./schema.js";
 
 // Types
 export type {
-  MontygateConfig,
-  RetryConfig,
   ExecutionLimitsConfig,
-  ResourceLimitsConfig,
+  ExecutionResult,
+  ExecutionStats,
+  MontygateConfig,
   PolicyConfig,
   PolicyRule,
-  ToolOptions,
-  ToolHandle,
-  ExecutionResult,
-  TraceEntry,
-  ExecutionStats,
+  ResourceLimitsConfig,
+  RetryConfig,
   SearchResult,
+  ToolHandle,
+  ToolOptions,
+  TraceEntry,
 } from "./types.js";

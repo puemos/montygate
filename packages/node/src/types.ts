@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { AnyToolDefinition, ToolHandlerMap } from "./normalize.js";
 
 /** Configuration for the Montygate engine. */
 export interface MontygateConfig {
@@ -6,6 +7,10 @@ export interface MontygateConfig {
   limits?: ExecutionLimitsConfig;
   resourceLimits?: ResourceLimitsConfig;
   policy?: PolicyConfig;
+  /** Tool definitions in any supported format (OpenAI, Anthropic, Vercel AI, etc.). */
+  tools?: AnyToolDefinition[] | Record<string, AnyToolDefinition>;
+  /** Handler map for tool formats without embedded handlers. */
+  handlers?: ToolHandlerMap;
 }
 
 export interface RetryConfig {
