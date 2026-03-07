@@ -1,1 +1,37 @@
+# Rust
 /target/
+**/*.rs.bk
+
+# Node.js
+node_modules/
+pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# TypeScript build output
+dist/
+*.tsbuildinfo
+
+# NAPI-RS native binaries (platform-specific, built in CI)
+*.node
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test & coverage
+coverage/
+.nyc_output/

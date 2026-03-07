@@ -1,8 +1,7 @@
 [workspace]
 members = [
     "crates/montygate-core",
-    "crates/montygate-mcp",
-    "crates/montygate-cli",
+    "bindings/napi",
 ]
 resolver = "3"
 
@@ -17,16 +16,10 @@ repository = "https://github.com/puemos/montygate"
 [workspace.dependencies]
 # Core async runtime
 tokio = { version = "1.43", features = ["full"] }
-tokio-util = "0.7"
-tokio-stream = "0.1"
-
-# MCP Protocol (official Rust SDK)
-rmcp = { version = "0.15", features = ["server", "client", "macros", "transport-child-process", "transport-io", "schemars", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-schemars = "1.0"
 
 # Error handling
 thiserror = "2.0"
@@ -36,10 +29,6 @@ anyhow = "1.0"
 async-trait = "0.1"
 futures = "0.3"
 
-# Configuration
-toml = "0.8"
-config = "0.15"
-
 # Tracing and logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -47,7 +36,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Testing
 tempfile = "3.16"
 mockall = "0.13"
-wiremock = "0.6"
 
 # Utilities
 regex = "1.11"
@@ -62,13 +50,6 @@ governor = "0.8"
 
 # Python execution engine (sandboxed interpreter)
 monty = { git = "https://github.com/pydantic/monty", tag = "v0.0.4" }
-
-# HTTP client (for SSE transport)
-reqwest = { version = "0.12", features = ["json", "stream"] }
-eventsource-client = "0.14"
-
-# HTTP server (for SSE/HTTP upstream transport)
-axum = "0.8"
 
 [profile.release]
 opt-level = 3

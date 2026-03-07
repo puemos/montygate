@@ -22,25 +22,25 @@ impl Default for ToolCallId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: ToolCallId,
-    pub server: String,
     pub tool: String,
     pub arguments: serde_json::Value,
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
     pub duration_ms: u64,
+    pub retries: u32,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 impl ToolCall {
-    pub fn new(server: String, tool: String, arguments: serde_json::Value) -> Self {
+    pub fn new(tool: String, arguments: serde_json::Value) -> Self {
         Self {
             id: ToolCallId::new(),
-            server,
             tool,
             arguments,
             result: None,
             error: None,
             duration_ms: 0,
+            retries: 0,
             timestamp: chrono::Utc::now(),
         }
     }
@@ -54,6 +54,11 @@ impl ToolCall {
     pub fn with_error(mut self, error: String, duration_ms: u64) -> Self {
         self.error = Some(error);
         self.duration_ms = duration_ms;
+        self
+    }
+
+    pub fn with_retries(mut self, retries: u32) -> Self {
+        self.retries = retries;
         self
     }
 }
@@ -132,6 +137,24 @@ impl Default for ResourceLimits {
     }
 }
 
+/// Execution limits for the scheduler (concurrency + timeout)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionLimits {
+    /// Timeout per tool call in milliseconds
+    pub timeout_ms: u64,
+    /// Maximum number of concurrent tool calls
+    pub max_concurrent: usize,
+}
+
+impl Default for ExecutionLimits {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 30_000,
+            max_concurrent: 5,
+        }
+    }
+}
+
 /// Error types for Montygate
 #[derive(Error, Debug)]
 pub enum MontygateError {
@@ -141,9 +164,6 @@ pub enum MontygateError {
     #[error("Tool not found: {0}")]
     ToolNotFound(String),
 
-    #[error("Server not found: {0}")]
-    ServerNotFound(String),
-
     #[error("Policy violation: {0}")]
     PolicyViolation(String),
 
@@ -152,6 +172,15 @@ pub enum MontygateError {
 
     #[error("Resource limit exceeded: {0}")]
     ResourceLimitExceeded(String),
+
+    #[error("Timeout: {0}")]
+    Timeout(String),
+
+    #[error("Max retries exceeded: {0}")]
+    MaxRetries(String),
+
+    #[error("Validation error: {0}")]
+    Validation(String),
 
     #[error("Type check error: {0}")]
     TypeCheck(String),
@@ -168,22 +197,13 @@ pub enum MontygateError {
     #[error("Configuration error: {0}")]
     Configuration(String),
 
-    #[error("MCP error: {0}")]
-    Mcp(String),
-
-    #[error("Bridge error: {0}")]
-    Bridge(String),
-
     #[error("External call interrupted")]
     Interrupted,
-
-    #[error("Snapshot error: {0}")]
-    Snapshot(String),
 }
 
 pub type Result<T> = std::result::Result<T, MontygateError>;
 
-/// Tool definition as received from downstream MCP server
+/// Tool definition registered by the developer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -191,128 +211,34 @@ pub struct ToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
-/// Server configuration for downstream MCP servers
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerConfig {
-    pub name: String,
-    pub transport: TransportConfig,
-}
-
-/// Transport configuration for MCP connections
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TransportConfig {
-    Stdio {
-        command: String,
-        args: Vec<String>,
-        #[serde(default)]
-        env: HashMap<String, String>,
-    },
-    Sse {
-        url: String,
-    },
-    StreamableHttp {
-        url: String,
-    },
-}
-
-impl TransportConfig {
-    /// Get the command if this is a Stdio transport
-    pub fn command(&self) -> Option<&String> {
-        match self {
-            TransportConfig::Stdio { command, .. } => Some(command),
-            _ => None,
-        }
-    }
-
-    /// Get the args if this is a Stdio transport
-    pub fn args(&self) -> Option<&Vec<String>> {
-        match self {
-            TransportConfig::Stdio { args, .. } => Some(args),
-            _ => None,
-        }
-    }
-
-    /// Get the env if this is a Stdio transport
-    pub fn env(&self) -> Option<&HashMap<String, String>> {
-        match self {
-            TransportConfig::Stdio { env, .. } => Some(env),
-            _ => None,
-        }
-    }
-
-    /// Get the URL if this is an SSE or HTTP transport
-    pub fn url(&self) -> Option<&String> {
-        match self {
-            TransportConfig::Sse { url } => Some(url),
-            TransportConfig::StreamableHttp { url } => Some(url),
-            _ => None,
-        }
-    }
-
-    /// Get the transport type as a string
-    pub fn transport_type(&self) -> &'static str {
-        match self {
-            TransportConfig::Stdio { .. } => "stdio",
-            TransportConfig::Sse { .. } => "sse",
-            TransportConfig::StreamableHttp { .. } => "http",
-        }
-    }
-}
-
-/// Retry configuration for MCP client connections
+/// Retry configuration for tool calls
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
     /// Maximum number of retries before giving up (default: 3)
     pub max_retries: u32,
     /// Base delay in milliseconds for exponential backoff (default: 100)
-    pub retry_base_delay_ms: u64,
-    /// Connection timeout in seconds (default: 30)
-    pub connection_timeout_secs: u64,
-    /// Request timeout in seconds (default: 60)
-    pub request_timeout_secs: u64,
+    pub base_delay_ms: u64,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
             max_retries: 3,
-            retry_base_delay_ms: 100,
-            connection_timeout_secs: 30,
-            request_timeout_secs: 60,
+            base_delay_ms: 100,
         }
     }
 }
 
-/// Configuration for the Montygate server
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MontygateConfig {
-    pub server: ServerInfo,
-    #[serde(default)]
-    pub servers: Vec<ServerConfig>,
-    #[serde(default)]
-    pub limits: ResourceLimits,
-    #[serde(default)]
-    pub policy: PolicyConfig,
-    #[serde(default)]
-    pub retry: RetryConfig,
-}
-
+/// Policy action for tool access control
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerInfo {
-    pub name: String,
-    pub version: String,
+#[serde(rename_all = "snake_case")]
+pub enum PolicyAction {
+    Allow,
+    Deny,
+    RequireApproval,
 }
 
-impl Default for ServerInfo {
-    fn default() -> Self {
-        Self {
-            name: "montygate".to_string(),
-            version: "0.1.0".to_string(),
-        }
-    }
-}
-
+/// Policy configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PolicyConfig {
     #[serde(default)]
@@ -340,14 +266,6 @@ pub struct PolicyRule {
     pub action: PolicyAction,
     #[serde(default)]
     pub rate_limit: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PolicyAction {
-    Allow,
-    Deny,
-    RequireApproval,
 }
 
 /// Input for running a program
@@ -422,22 +340,20 @@ mod tests {
     #[test]
     fn test_tool_call_creation() {
         let call = ToolCall::new(
-            "github".to_string(),
             "create_issue".to_string(),
             serde_json::json!({"repo": "test/repo", "title": "Test"}),
         );
 
-        assert_eq!(call.server, "github");
         assert_eq!(call.tool, "create_issue");
         assert!(call.result.is_none());
         assert!(call.error.is_none());
         assert_eq!(call.duration_ms, 0);
+        assert_eq!(call.retries, 0);
     }
 
     #[test]
     fn test_tool_call_with_result() {
         let call = ToolCall::new(
-            "github".to_string(),
             "create_issue".to_string(),
             serde_json::json!({}),
         )
@@ -451,7 +367,6 @@ mod tests {
     #[test]
     fn test_tool_call_with_error() {
         let call = ToolCall::new(
-            "github".to_string(),
             "create_issue".to_string(),
             serde_json::json!({}),
         )
@@ -463,9 +378,15 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_call_with_retries() {
+        let call = ToolCall::new("test".to_string(), serde_json::json!({}))
+            .with_retries(3);
+        assert_eq!(call.retries, 3);
+    }
+
+    #[test]
     fn test_tool_call_serialization() {
         let call = ToolCall::new(
-            "github".to_string(),
             "create_issue".to_string(),
             serde_json::json!({"title": "Bug"}),
         )
@@ -473,7 +394,6 @@ mod tests {
 
         let json = serde_json::to_string(&call).unwrap();
         let deserialized: ToolCall = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.server, "github");
         assert_eq!(deserialized.tool, "create_issue");
         assert_eq!(deserialized.duration_ms, 100);
     }
@@ -506,7 +426,6 @@ mod tests {
     #[test]
     fn test_execution_result_with_trace() {
         let call = ToolCall::new(
-            "test".to_string(),
             "echo".to_string(),
             serde_json::json!({}),
         );
@@ -514,7 +433,7 @@ mod tests {
             ExecutionResult::success(serde_json::json!("ok")).with_trace(vec![call]);
 
         assert_eq!(result.trace.len(), 1);
-        assert_eq!(result.trace[0].server, "test");
+        assert_eq!(result.trace[0].tool, "echo");
     }
 
     #[test]
@@ -585,6 +504,27 @@ mod tests {
         assert_eq!(deserialized.max_execution_time_ms, 30_000);
     }
 
+    // === ExecutionLimits ===
+
+    #[test]
+    fn test_execution_limits_default() {
+        let limits = ExecutionLimits::default();
+        assert_eq!(limits.timeout_ms, 30_000);
+        assert_eq!(limits.max_concurrent, 5);
+    }
+
+    #[test]
+    fn test_execution_limits_serialization() {
+        let limits = ExecutionLimits {
+            timeout_ms: 5000,
+            max_concurrent: 2,
+        };
+        let json = serde_json::to_string(&limits).unwrap();
+        let deserialized: ExecutionLimits = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.timeout_ms, 5000);
+        assert_eq!(deserialized.max_concurrent, 2);
+    }
+
     // === MontygateError ===
 
     #[test]
@@ -596,10 +536,6 @@ mod tests {
         assert_eq!(
             MontygateError::ToolNotFound("x".into()).to_string(),
             "Tool not found: x"
-        );
-        assert_eq!(
-            MontygateError::ServerNotFound("s".into()).to_string(),
-            "Server not found: s"
         );
         assert_eq!(
             MontygateError::PolicyViolation("denied".into()).to_string(),
@@ -614,6 +550,18 @@ mod tests {
             "Resource limit exceeded: mem"
         );
         assert_eq!(
+            MontygateError::Timeout("5s".into()).to_string(),
+            "Timeout: 5s"
+        );
+        assert_eq!(
+            MontygateError::MaxRetries("3 attempts".into()).to_string(),
+            "Max retries exceeded: 3 attempts"
+        );
+        assert_eq!(
+            MontygateError::Validation("bad input".into()).to_string(),
+            "Validation error: bad input"
+        );
+        assert_eq!(
             MontygateError::TypeCheck("bad type".into()).to_string(),
             "Type check error: bad type"
         );
@@ -626,20 +574,8 @@ mod tests {
             "Configuration error: missing"
         );
         assert_eq!(
-            MontygateError::Mcp("proto".into()).to_string(),
-            "MCP error: proto"
-        );
-        assert_eq!(
-            MontygateError::Bridge("dispatch".into()).to_string(),
-            "Bridge error: dispatch"
-        );
-        assert_eq!(
             MontygateError::Interrupted.to_string(),
             "External call interrupted"
-        );
-        assert_eq!(
-            MontygateError::Snapshot("corrupt".into()).to_string(),
-            "Snapshot error: corrupt"
         );
     }
 
@@ -657,193 +593,28 @@ mod tests {
         assert!(err.to_string().contains("Serialization error"));
     }
 
-    // === TransportConfig ===
-
-    #[test]
-    fn test_transport_config_deserialization() {
-        let json = serde_json::json!({
-            "type": "stdio",
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-github"],
-            "env": {"GITHUB_TOKEN": "test"}
-        });
-
-        let config: TransportConfig = serde_json::from_value(json).unwrap();
-        match config {
-            TransportConfig::Stdio { command, args, env } => {
-                assert_eq!(command, "npx");
-                assert_eq!(args, vec!["-y", "@modelcontextprotocol/server-github"]);
-                assert_eq!(env.get("GITHUB_TOKEN").unwrap(), "test");
-            }
-            _ => panic!("Expected Stdio transport"),
-        }
-    }
-
-    #[test]
-    fn test_transport_config_sse_deserialization() {
-        let json = serde_json::json!({
-            "type": "sse",
-            "url": "http://localhost:3000/sse"
-        });
-        let config: TransportConfig = serde_json::from_value(json).unwrap();
-        match &config {
-            TransportConfig::Sse { url } => assert_eq!(url, "http://localhost:3000/sse"),
-            _ => panic!("Expected Sse transport"),
-        }
-    }
-
-    #[test]
-    fn test_transport_config_streamable_http_deserialization() {
-        let json = serde_json::json!({
-            "type": "streamable_http",
-            "url": "http://localhost:8080/mcp"
-        });
-        let config: TransportConfig = serde_json::from_value(json).unwrap();
-        match &config {
-            TransportConfig::StreamableHttp { url } => {
-                assert_eq!(url, "http://localhost:8080/mcp")
-            }
-            _ => panic!("Expected StreamableHttp transport"),
-        }
-    }
-
-    #[test]
-    fn test_transport_config_command_method() {
-        let stdio = TransportConfig::Stdio {
-            command: "node".into(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        assert_eq!(stdio.command(), Some(&"node".to_string()));
-
-        let sse = TransportConfig::Sse {
-            url: "http://x".into(),
-        };
-        assert_eq!(sse.command(), None);
-
-        let http = TransportConfig::StreamableHttp {
-            url: "http://x".into(),
-        };
-        assert_eq!(http.command(), None);
-    }
-
-    #[test]
-    fn test_transport_config_args_method() {
-        let stdio = TransportConfig::Stdio {
-            command: "node".into(),
-            args: vec!["server.js".into()],
-            env: HashMap::new(),
-        };
-        assert_eq!(stdio.args(), Some(&vec!["server.js".to_string()]));
-
-        let sse = TransportConfig::Sse {
-            url: "http://x".into(),
-        };
-        assert_eq!(sse.args(), None);
-    }
-
-    #[test]
-    fn test_transport_config_env_method() {
-        let mut env = HashMap::new();
-        env.insert("KEY".into(), "VAL".into());
-        let stdio = TransportConfig::Stdio {
-            command: "node".into(),
-            args: vec![],
-            env: env.clone(),
-        };
-        assert_eq!(stdio.env(), Some(&env));
-
-        let sse = TransportConfig::Sse {
-            url: "http://x".into(),
-        };
-        assert_eq!(sse.env(), None);
-    }
-
-    #[test]
-    fn test_transport_config_url_method() {
-        let stdio = TransportConfig::Stdio {
-            command: "node".into(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        assert_eq!(stdio.url(), None);
-
-        let sse = TransportConfig::Sse {
-            url: "http://localhost:3000".into(),
-        };
-        assert_eq!(sse.url(), Some(&"http://localhost:3000".to_string()));
-
-        let http = TransportConfig::StreamableHttp {
-            url: "http://localhost:8080".into(),
-        };
-        assert_eq!(http.url(), Some(&"http://localhost:8080".to_string()));
-    }
-
-    #[test]
-    fn test_transport_config_transport_type() {
-        let stdio = TransportConfig::Stdio {
-            command: "x".into(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        assert_eq!(stdio.transport_type(), "stdio");
-
-        let sse = TransportConfig::Sse {
-            url: "http://x".into(),
-        };
-        assert_eq!(sse.transport_type(), "sse");
-
-        let http = TransportConfig::StreamableHttp {
-            url: "http://x".into(),
-        };
-        assert_eq!(http.transport_type(), "http");
-    }
-
     // === RetryConfig ===
 
     #[test]
     fn test_retry_config_default() {
         let config = RetryConfig::default();
         assert_eq!(config.max_retries, 3);
-        assert_eq!(config.retry_base_delay_ms, 100);
-        assert_eq!(config.connection_timeout_secs, 30);
-        assert_eq!(config.request_timeout_secs, 60);
+        assert_eq!(config.base_delay_ms, 100);
     }
 
     #[test]
     fn test_retry_config_serialization() {
         let config = RetryConfig {
             max_retries: 5,
-            retry_base_delay_ms: 200,
-            connection_timeout_secs: 15,
-            request_timeout_secs: 45,
+            base_delay_ms: 200,
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: RetryConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.max_retries, 5);
-        assert_eq!(deserialized.retry_base_delay_ms, 200);
-        assert_eq!(deserialized.connection_timeout_secs, 15);
-        assert_eq!(deserialized.request_timeout_secs, 45);
+        assert_eq!(deserialized.base_delay_ms, 200);
     }
 
-    // === Config types ===
-
-    #[test]
-    fn test_montygate_config_default() {
-        let config = MontygateConfig::default();
-        assert_eq!(config.server.name, "montygate");
-        assert_eq!(config.server.version, "0.1.0");
-        assert!(config.servers.is_empty());
-        assert_eq!(config.limits.max_execution_time_ms, 30_000);
-        assert_eq!(config.retry.max_retries, 3);
-    }
-
-    #[test]
-    fn test_server_info_default() {
-        let info = ServerInfo::default();
-        assert_eq!(info.name, "montygate");
-        assert_eq!(info.version, "0.1.0");
-    }
+    // === Policy types ===
 
     #[test]
     fn test_policy_config_default() {
@@ -920,72 +691,13 @@ mod tests {
         assert!(!input.type_check);
     }
 
-    // === ServerConfig ===
-
-    #[test]
-    fn test_server_config_serialization() {
-        let config = ServerConfig {
-            name: "github".to_string(),
-            transport: TransportConfig::Stdio {
-                command: "npx".into(),
-                args: vec!["-y".into(), "server-github".into()],
-                env: HashMap::new(),
-            },
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: ServerConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.name, "github");
-        assert_eq!(deserialized.transport.command(), Some(&"npx".to_string()));
-    }
-
-    #[test]
-    fn test_montygate_config_with_retry_in_json() {
-        let json = serde_json::json!({
-            "server": {"name": "test", "version": "1.0.0"},
-            "retry": {
-                "max_retries": 5,
-                "retry_base_delay_ms": 200,
-                "connection_timeout_secs": 15,
-                "request_timeout_secs": 45
-            }
-        });
-        let config: MontygateConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(config.retry.max_retries, 5);
-        assert_eq!(config.retry.retry_base_delay_ms, 200);
-    }
-
-    // === MontygateConfig full round-trip ===
-
-    #[test]
-    fn test_montygate_config_serialization() {
-        let config = MontygateConfig {
-            server: ServerInfo {
-                name: "test".to_string(),
-                version: "1.0.0".to_string(),
-            },
-            servers: vec![ServerConfig {
-                name: "gh".to_string(),
-                transport: TransportConfig::Sse {
-                    url: "http://localhost:3000".into(),
-                },
-            }],
-            limits: ResourceLimits::default(),
-            policy: PolicyConfig::default(),
-            retry: RetryConfig::default(),
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: MontygateConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.server.name, "test");
-        assert_eq!(deserialized.servers.len(), 1);
-    }
-
     // === ExternalCall ===
 
     #[test]
     fn test_external_call() {
         let call = ExternalCall {
             function_name: "tool".to_string(),
-            arguments: serde_json::json!({"name": "github.create_issue"}),
+            arguments: serde_json::json!({"name": "create_issue"}),
         };
         assert_eq!(call.function_name, "tool");
     }
@@ -1037,8 +749,7 @@ mod tests {
             state: vec![],
             pending_call: None,
             trace: vec![ToolCall::new(
-                "s".to_string(),
-                "t".to_string(),
+                "test_tool".to_string(),
                 serde_json::json!({}),
             )],
         };
@@ -1074,21 +785,5 @@ mod tests {
         let json = serde_json::to_string(&def).unwrap();
         let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
         assert!(deserialized.description.is_none());
-    }
-
-    // === Stdio transport with default env ===
-
-    #[test]
-    fn test_transport_stdio_default_env() {
-        let json = serde_json::json!({
-            "type": "stdio",
-            "command": "node",
-            "args": []
-        });
-        let config: TransportConfig = serde_json::from_value(json).unwrap();
-        match config {
-            TransportConfig::Stdio { env, .. } => assert!(env.is_empty()),
-            _ => panic!("Expected Stdio"),
-        }
     }
 }

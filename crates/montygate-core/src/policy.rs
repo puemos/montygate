@@ -1,4 +1,3 @@
-use crate::registry::ToolRoute;
 use crate::types::{PolicyAction, PolicyConfig, Result};
 use crate::MontygateError;
 use dashmap::DashMap;
@@ -50,19 +49,17 @@ impl PolicyEngine {
         engine
     }
 
-    /// Check if a tool call is allowed
+    /// Check if a tool call is allowed by name
     pub async fn check(
         &self,
-        route: &ToolRoute,
-        _args: &serde_json::Value,
+        tool_name: &str,
+        args: &serde_json::Value,
     ) -> Result<PolicyDecision> {
-        let tool_name = format!("{}.{}", route.server_name, route.tool_name);
-
         debug!("Checking policy for tool '{}'", tool_name);
 
         // Check rules in order (more specific rules should come first)
         for rule in &self.config.rules {
-            if matches_pattern(&rule.match_pattern, &tool_name) {
+            if matches_pattern(&rule.match_pattern, tool_name) {
                 match rule.action {
                     PolicyAction::Allow => {
                         // Check rate limiting if configured
@@ -73,7 +70,7 @@ impl PolicyEngine {
                                     tool_name, entry.quota_desc
                                 );
                                 return Ok(PolicyDecision::RateLimitExceeded {
-                                    tool: tool_name,
+                                    tool: tool_name.to_string(),
                                     limit: entry.quota_desc.clone(),
                                 });
                             }
@@ -94,8 +91,8 @@ impl PolicyEngine {
                             tool_name, rule.match_pattern
                         );
                         return Ok(PolicyDecision::RequireApproval {
-                            tool: tool_name,
-                            args: _args.clone(),
+                            tool: tool_name.to_string(),
+                            args: args.clone(),
                         });
                     }
                 }
@@ -117,8 +114,8 @@ impl PolicyEngine {
             PolicyAction::RequireApproval => {
                 info!("Tool '{}' requires approval by default policy", tool_name);
                 Ok(PolicyDecision::RequireApproval {
-                    tool: tool_name,
-                    args: _args.clone(),
+                    tool: tool_name.to_string(),
+                    args: args.clone(),
                 })
             }
         }
@@ -126,8 +123,6 @@ impl PolicyEngine {
 
     /// Check if a tool call should be rate limited
     pub fn check_rate_limit(&self, tool_name: &str) -> Result<()> {
-        // This is a simplified version - in practice, you'd want per-tool rate limiting
-        // For now, we just check if there are any rate limit entries that match
         for entry in self.rate_limits.iter() {
             if matches_pattern(entry.key(), tool_name) {
                 if let Err(_e) = entry.limiter.check() {
@@ -148,10 +143,8 @@ impl PolicyEngine {
 
     /// Update the policy configuration
     pub fn update_config(&mut self, config: PolicyConfig) {
-        // Clear old rate limits
         self.rate_limits.clear();
 
-        // Re-initialize with new config
         for rule in &config.rules {
             if let Some(rate_limit_str) = &rule.rate_limit {
                 if let Ok(limiter) = parse_rate_limit(rate_limit_str) {
@@ -201,12 +194,10 @@ impl PolicyDecision {
 
 /// Check if a tool name matches a pattern (supports wildcards)
 fn matches_pattern(pattern: &str, tool_name: &str) -> bool {
-    // Handle exact match
     if pattern == tool_name {
         return true;
     }
 
-    // Handle wildcard patterns
     if pattern.contains('*') {
         let regex_pattern = pattern.replace(".", r"\.").replace("*", ".*");
         if let Ok(regex) = Regex::new(&format!("^{}$", regex_pattern)) {
@@ -214,9 +205,8 @@ fn matches_pattern(pattern: &str, tool_name: &str) -> bool {
         }
     }
 
-    // Handle server.* patterns
-    if let Some(server) = pattern.strip_suffix(".*") {
-        return tool_name.starts_with(&format!("{}.", server));
+    if let Some(prefix) = pattern.strip_suffix(".*") {
+        return tool_name.starts_with(&format!("{}.", prefix));
     }
 
     false
@@ -273,12 +263,12 @@ mod tests {
                     rate_limit: None,
                 },
                 PolicyRule {
-                    match_pattern: "github.create_issue".to_string(),
+                    match_pattern: "create_issue".to_string(),
                     action: PolicyAction::Allow,
                     rate_limit: Some("10/min".to_string()),
                 },
                 PolicyRule {
-                    match_pattern: "salesforce.update_record".to_string(),
+                    match_pattern: "update_record".to_string(),
                     action: PolicyAction::RequireApproval,
                     rate_limit: None,
                 },
@@ -286,50 +276,24 @@ mod tests {
         }
     }
 
-    fn make_route(server: &str, tool: &str) -> ToolRoute {
-        ToolRoute {
-            server_name: server.to_string(),
-            tool_name: tool.to_string(),
-            definition: crate::types::ToolDefinition {
-                name: tool.to_string(),
-                description: None,
-                input_schema: serde_json::json!({}),
-            },
-        }
-    }
-
     // === matches_pattern ===
 
     #[test]
     fn test_matches_pattern_exact() {
-        assert!(matches_pattern(
-            "github.create_issue",
-            "github.create_issue"
-        ));
-        assert!(!matches_pattern(
-            "github.create_issue",
-            "github.list_issues"
-        ));
+        assert!(matches_pattern("create_issue", "create_issue"));
+        assert!(!matches_pattern("create_issue", "list_issues"));
     }
 
     #[test]
     fn test_matches_pattern_wildcard() {
-        assert!(matches_pattern("*.delete_*", "github.delete_repo"));
-        assert!(matches_pattern("*.delete_*", "postgres.delete_row"));
-        assert!(!matches_pattern("*.delete_*", "github.create_issue"));
-    }
-
-    #[test]
-    fn test_matches_pattern_server_wildcard() {
-        assert!(matches_pattern("github.*", "github.create_issue"));
-        assert!(matches_pattern("github.*", "github.delete_repo"));
-        assert!(!matches_pattern("github.*", "slack.post_message"));
+        assert!(matches_pattern("*delete*", "delete_repo"));
+        assert!(matches_pattern("*delete*", "bulk_delete_rows"));
+        assert!(!matches_pattern("*delete*", "create_issue"));
     }
 
     #[test]
     fn test_matches_pattern_no_match() {
-        assert!(!matches_pattern("exact.match", "other.tool"));
-        assert!(!matches_pattern("server.tool", "server.other"));
+        assert!(!matches_pattern("exact_match", "other_tool"));
     }
 
     // === PolicyEngine ===
@@ -351,24 +315,34 @@ mod tests {
     #[tokio::test]
     async fn test_allow_policy() {
         let engine = PolicyEngine::new(create_test_policy_config());
-        let route = make_route("github", "create_issue");
-        let decision = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let decision = engine.check("create_issue", &serde_json::json!({})).await.unwrap();
         assert!(decision.is_allowed());
     }
 
     #[tokio::test]
     async fn test_deny_policy() {
-        let engine = PolicyEngine::new(create_test_policy_config());
-        let route = make_route("github", "delete_repo");
-        let decision = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let config = PolicyConfig {
+            defaults: PolicyDefaults {
+                action: PolicyAction::Allow,
+            },
+            rules: vec![PolicyRule {
+                match_pattern: "delete_repo".to_string(),
+                action: PolicyAction::Deny,
+                rate_limit: None,
+            }],
+        };
+        let engine = PolicyEngine::new(config);
+        let decision = engine.check("delete_repo", &serde_json::json!({})).await.unwrap();
         assert!(decision.is_denied());
     }
 
     #[tokio::test]
     async fn test_require_approval_policy() {
         let engine = PolicyEngine::new(create_test_policy_config());
-        let route = make_route("salesforce", "update_record");
-        let decision = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let decision = engine
+            .check("update_record", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(decision.requires_approval());
     }
 
@@ -381,8 +355,7 @@ mod tests {
             rules: vec![],
         };
         let engine = PolicyEngine::new(config);
-        let route = make_route("any", "tool");
-        let decision = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let decision = engine.check("any_tool", &serde_json::json!({})).await.unwrap();
         assert!(decision.is_allowed());
     }
 
@@ -395,8 +368,7 @@ mod tests {
             rules: vec![],
         };
         let engine = PolicyEngine::new(config);
-        let route = make_route("any", "tool");
-        let decision = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let decision = engine.check("any_tool", &serde_json::json!({})).await.unwrap();
         assert!(decision.is_denied());
     }
 
@@ -409,8 +381,7 @@ mod tests {
             rules: vec![],
         };
         let engine = PolicyEngine::new(config);
-        let route = make_route("any", "tool");
-        let decision = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let decision = engine.check("any_tool", &serde_json::json!({})).await.unwrap();
         assert!(decision.requires_approval());
     }
 
@@ -421,17 +392,16 @@ mod tests {
                 action: PolicyAction::Allow,
             },
             rules: vec![PolicyRule {
-                match_pattern: "test.tool".to_string(),
+                match_pattern: "test_tool".to_string(),
                 action: PolicyAction::Allow,
                 rate_limit: Some("2/min".to_string()),
             }],
         };
         let engine = PolicyEngine::new(config);
-        let route = make_route("test", "tool");
 
-        let d1 = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let d1 = engine.check("test_tool", &serde_json::json!({})).await.unwrap();
         assert!(d1.is_allowed());
-        let d2 = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let d2 = engine.check("test_tool", &serde_json::json!({})).await.unwrap();
         assert!(d2.is_allowed());
     }
 
@@ -442,20 +412,17 @@ mod tests {
                 action: PolicyAction::Allow,
             },
             rules: vec![PolicyRule {
-                match_pattern: "test.limited".to_string(),
+                match_pattern: "test_limited".to_string(),
                 action: PolicyAction::Allow,
                 rate_limit: Some("1/min".to_string()),
             }],
         };
         let engine = PolicyEngine::new(config);
-        let route = make_route("test", "limited");
 
-        // First call should succeed
-        let d1 = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let d1 = engine.check("test_limited", &serde_json::json!({})).await.unwrap();
         assert!(d1.is_allowed());
 
-        // Second call should be rate limited
-        let d2 = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let d2 = engine.check("test_limited", &serde_json::json!({})).await.unwrap();
         assert!(matches!(d2, PolicyDecision::RateLimitExceeded { .. }));
     }
 
@@ -466,25 +433,22 @@ mod tests {
                 action: PolicyAction::Allow,
             },
             rules: vec![PolicyRule {
-                match_pattern: "test.tool".to_string(),
+                match_pattern: "test_tool".to_string(),
                 action: PolicyAction::Allow,
                 rate_limit: Some("1/min".to_string()),
             }],
         };
         let engine = PolicyEngine::new(config);
 
-        // First call ok
-        assert!(engine.check_rate_limit("test.tool").is_ok());
-
-        // Second should fail
-        let result = engine.check_rate_limit("test.tool");
+        assert!(engine.check_rate_limit("test_tool").is_ok());
+        let result = engine.check_rate_limit("test_tool");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_check_rate_limit_no_matching_pattern() {
         let engine = PolicyEngine::default();
-        assert!(engine.check_rate_limit("any.tool").is_ok());
+        assert!(engine.check_rate_limit("any_tool").is_ok());
     }
 
     #[test]
@@ -497,7 +461,7 @@ mod tests {
                 action: PolicyAction::Deny,
             },
             rules: vec![PolicyRule {
-                match_pattern: "test.*".to_string(),
+                match_pattern: "test_*".to_string(),
                 action: PolicyAction::Allow,
                 rate_limit: Some("5/min".to_string()),
             }],
@@ -518,32 +482,28 @@ mod tests {
                 action: PolicyAction::Allow,
             },
             rules: vec![PolicyRule {
-                match_pattern: "test.tool".to_string(),
+                match_pattern: "test_tool".to_string(),
                 action: PolicyAction::Allow,
                 rate_limit: Some("1/min".to_string()),
             }],
         };
         let mut engine = PolicyEngine::new(config);
-        let route = make_route("test", "tool");
 
-        // Exhaust the rate limit
-        let _ = engine.check(&route, &serde_json::json!({})).await;
+        let _ = engine.check("test_tool", &serde_json::json!({})).await;
 
-        // Now update config with a fresh rate limit
         let new_config = PolicyConfig {
             defaults: PolicyDefaults {
                 action: PolicyAction::Allow,
             },
             rules: vec![PolicyRule {
-                match_pattern: "test.tool".to_string(),
+                match_pattern: "test_tool".to_string(),
                 action: PolicyAction::Allow,
                 rate_limit: Some("10/min".to_string()),
             }],
         };
         engine.update_config(new_config);
 
-        // Should be allowed again
-        let d = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let d = engine.check("test_tool", &serde_json::json!({})).await.unwrap();
         assert!(d.is_allowed());
     }
 
@@ -565,13 +525,9 @@ mod tests {
 
     #[test]
     fn test_parse_rate_limit_errors() {
-        // Missing slash
         assert!(parse_rate_limit("invalid").is_err());
-        // Invalid count
         assert!(parse_rate_limit("abc/min").is_err());
-        // Invalid duration
         assert!(parse_rate_limit("10/invalid_duration").is_err());
-        // Too many slashes
         assert!(parse_rate_limit("10/min/extra").is_err());
     }
 
@@ -598,7 +554,7 @@ mod tests {
     #[test]
     fn test_policy_decision_require_approval() {
         let d = PolicyDecision::RequireApproval {
-            tool: "test.tool".into(),
+            tool: "test_tool".into(),
             args: serde_json::json!({"key": "val"}),
         };
         assert!(!d.is_allowed());
@@ -609,7 +565,7 @@ mod tests {
     #[test]
     fn test_policy_decision_rate_limit_exceeded() {
         let d = PolicyDecision::RateLimitExceeded {
-            tool: "test.tool".into(),
+            tool: "test_tool".into(),
             limit: "10/min".into(),
         };
         assert!(!d.is_allowed());
@@ -624,19 +580,18 @@ mod tests {
                 action: PolicyAction::Allow,
             },
             rules: vec![PolicyRule {
-                match_pattern: "test.approve".to_string(),
+                match_pattern: "approve_tool".to_string(),
                 action: PolicyAction::RequireApproval,
                 rate_limit: None,
             }],
         };
         let engine = PolicyEngine::new(config);
-        let route = make_route("test", "approve");
         let args = serde_json::json!({"key": "value"});
 
-        let decision = engine.check(&route, &args).await.unwrap();
+        let decision = engine.check("approve_tool", &args).await.unwrap();
         match decision {
             PolicyDecision::RequireApproval { tool, args: a } => {
-                assert_eq!(tool, "test.approve");
+                assert_eq!(tool, "approve_tool");
                 assert_eq!(a["key"], "value");
             }
             _ => panic!("Expected RequireApproval"),
@@ -650,17 +605,16 @@ mod tests {
                 action: PolicyAction::Allow,
             },
             rules: vec![PolicyRule {
-                match_pattern: "test.blocked".to_string(),
+                match_pattern: "blocked_tool".to_string(),
                 action: PolicyAction::Deny,
                 rate_limit: None,
             }],
         };
         let engine = PolicyEngine::new(config);
-        let route = make_route("test", "blocked");
-        let decision = engine.check(&route, &serde_json::json!({})).await.unwrap();
+        let decision = engine.check("blocked_tool", &serde_json::json!({})).await.unwrap();
         match decision {
             PolicyDecision::Deny { reason } => {
-                assert!(reason.contains("test.blocked"));
+                assert!(reason.contains("blocked_tool"));
             }
             _ => panic!("Expected Deny"),
         }
@@ -673,12 +627,11 @@ mod tests {
                 action: PolicyAction::Allow,
             },
             rules: vec![PolicyRule {
-                match_pattern: "test.tool".to_string(),
+                match_pattern: "test_tool".to_string(),
                 action: PolicyAction::Allow,
                 rate_limit: Some("invalid".to_string()),
             }],
         };
-        // Should not panic - invalid rate limits are simply skipped
         let _engine = PolicyEngine::new(config);
     }
 }

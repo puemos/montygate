@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "pnpm --filter montygate build",
+    "test": "pnpm --filter montygate test",
+    "napi": "pnpm --filter montygate napi"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

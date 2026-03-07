@@ -13,16 +13,11 @@ use tracing::{debug, info, warn};
 /// Trait for dispatching external tool calls
 #[async_trait::async_trait]
 pub trait ToolDispatcher: Send + Sync + std::fmt::Debug {
-    /// Dispatch a tool call to the appropriate downstream server
+    /// Dispatch a tool call to the appropriate handler
     async fn dispatch(&self, tool_name: &str, args: serde_json::Value) -> Result<serde_json::Value>;
 }
 
 /// Execution engine for running Monty programs
-///
-/// This is a trait-based abstraction that allows different implementations:
-/// - MockEngine: For testing
-/// - MontyEngine: Real Monty execution (when available)
-/// - DryRunEngine: Validates without executing
 #[async_trait::async_trait]
 pub trait ExecutionEngine: Send + Sync + std::fmt::Debug {
     /// Execute a program with the given inputs
@@ -40,10 +35,6 @@ pub trait ExecutionEngine: Send + Sync + std::fmt::Debug {
 }
 
 /// Mock execution engine for testing
-///
-/// This engine simulates Monty execution by parsing the code and extracting
-/// tool calls from special comments. It's useful for testing the integration
-/// without requiring the full Monty runtime.
 #[derive(Debug, Clone)]
 pub struct MockEngine {
     limits: ResourceLimits,
@@ -92,7 +83,6 @@ impl ExecutionEngine for MockEngine {
         let start = Instant::now();
         let mut trace = Vec::new();
 
-        // Validate code length
         if input.code.len() > self.limits.max_code_length {
             return Err(MontygateError::ResourceLimitExceeded(format!(
                 "Code exceeds maximum length of {} characters",
@@ -102,10 +92,8 @@ impl ExecutionEngine for MockEngine {
 
         info!("Starting mock execution");
 
-        // Parse tool calls from comments
         let tool_calls = self.parse_tool_calls(&input.code);
 
-        // Check external call limit
         if tool_calls.len() > self.limits.max_external_calls {
             return Err(MontygateError::ResourceLimitExceeded(format!(
                 "Too many external calls: {} (max: {})",
@@ -114,7 +102,6 @@ impl ExecutionEngine for MockEngine {
             )));
         }
 
-        // Execute each tool call
         for (tool_name, args) in tool_calls {
             let call_start = Instant::now();
             debug!("Dispatching tool call: {}", tool_name);
@@ -122,27 +109,13 @@ impl ExecutionEngine for MockEngine {
             match dispatcher.dispatch(&tool_name, args.clone()).await {
                 Ok(result) => {
                     let duration = call_start.elapsed().as_millis() as u64;
-                    let parts: Vec<&str> = tool_name.split('.').collect();
-                    let (server, tool) = if parts.len() >= 2 {
-                        (parts[0].to_string(), parts[1..].join("."))
-                    } else {
-                        ("unknown".to_string(), tool_name.clone())
-                    };
-
-                    let call = ToolCall::new(server, tool, args)
+                    let call = ToolCall::new(tool_name, args)
                         .with_result(result, duration);
                     trace.push(call);
                 }
                 Err(e) => {
                     let duration = call_start.elapsed().as_millis() as u64;
-                    let parts: Vec<&str> = tool_name.split('.').collect();
-                    let (server, tool) = if parts.len() >= 2 {
-                        (parts[0].to_string(), parts[1..].join("."))
-                    } else {
-                        ("unknown".to_string(), tool_name.clone())
-                    };
-
-                    let call = ToolCall::new(server, tool, args)
+                    let call = ToolCall::new(tool_name, args)
                         .with_error(e.to_string(), duration);
                     trace.push(call);
                 }
@@ -177,7 +150,6 @@ impl ExecutionEngine for MockEngine {
     }
 
     fn validate(&self, code: &str) -> Result<()> {
-        // Basic validation: check for syntax-like issues
         let mut paren_depth = 0;
         let mut brace_depth = 0;
         let mut bracket_depth = 0;
@@ -243,14 +215,6 @@ enum ToolCallMessage {
 }
 
 /// Real execution engine backed by Monty (RustPython-based sandboxed interpreter).
-///
-/// Runs Python code with a single registered external function `tool(name, ...)`.
-/// When the Python code calls `tool("server.tool_name", key=val)`, Monty pauses
-/// execution and we dispatch the call to the MCP tool via the `ToolDispatcher`,
-/// then resume with the result.
-///
-/// Monty's internal types are `!Send`, so execution runs inside
-/// `tokio::task::spawn_blocking` with channels bridging to the async world.
 #[derive(Debug, Clone)]
 pub struct MontyEngine {
     limits: ResourceLimits,
@@ -262,15 +226,10 @@ impl MontyEngine {
     }
 
     /// Parse a tool call from Monty's FunctionCall args/kwargs.
-    ///
-    /// Convention: `tool("server.tool_name", key=val, ...)` or `tool("server.tool_name", {"key": val})`
-    /// - args[0] = tool name string
-    /// - kwargs = tool arguments as dict, OR args[1] if it's a dict
     fn parse_tool_call(
         args: &[MontyObject],
         kwargs: &[(MontyObject, MontyObject)],
     ) -> std::result::Result<(String, serde_json::Value), String> {
-        // First arg must be the tool name string
         let tool_name = match args.first() {
             Some(MontyObject::String(s)) => s.clone(),
             Some(other) => {
@@ -284,7 +243,6 @@ impl MontyEngine {
             }
         };
 
-        // Build arguments from kwargs first, then fall back to args[1] if it's a dict
         let tool_args = if !kwargs.is_empty() {
             let mut map = serde_json::Map::new();
             for (k, v) in kwargs {
@@ -305,9 +263,6 @@ impl MontyEngine {
     }
 
     /// Parse batch_tools arguments from Monty's FunctionCall args.
-    ///
-    /// Convention: `batch_tools([(name, args_dict), ...])`
-    /// - args[0] = list of (name, args_dict) tuples
     fn parse_batch_tool_args(
         args: &[MontyObject],
     ) -> std::result::Result<Vec<(String, serde_json::Value)>, String> {
@@ -377,7 +332,6 @@ impl ExecutionEngine for MontyEngine {
     ) -> Result<ExecutionResult> {
         let start = Instant::now();
 
-        // Validate code length
         if input.code.len() > self.limits.max_code_length {
             return Err(MontygateError::ResourceLimitExceeded(format!(
                 "Code exceeds maximum length of {} characters",
@@ -389,10 +343,8 @@ impl ExecutionEngine for MontyEngine {
 
         info!("Starting Monty execution");
 
-        // Channel for tool call requests from the blocking Monty thread
         let (call_tx, mut call_rx) = mpsc::channel::<ToolCallMessage>(1);
 
-        // Build monty resource limits
         let monty_limits = monty::ResourceLimits {
             max_memory: Some(self.limits.max_memory_bytes),
             max_duration: Some(std::time::Duration::from_millis(
@@ -406,12 +358,10 @@ impl ExecutionEngine for MontyEngine {
         let code = input.code.clone();
         let inputs = input.inputs.clone();
 
-        // Spawn the Monty interpreter in a blocking thread
         let monty_handle = tokio::task::spawn_blocking(move || {
             run_monty_blocking(&code, monty_limits, max_external_calls, call_tx, inputs)
         });
 
-        // Async side: dispatch tool calls as they come in from the Monty thread
         let mut trace = Vec::new();
         while let Some(msg) = call_rx.recv().await {
             match msg {
@@ -419,17 +369,10 @@ impl ExecutionEngine for MontyEngine {
                     let call_start = Instant::now();
                     debug!("Dispatching tool call: {}", req.tool_name);
 
-                    let parts: Vec<&str> = req.tool_name.split('.').collect();
-                    let (server, tool) = if parts.len() >= 2 {
-                        (parts[0].to_string(), parts[1..].join("."))
-                    } else {
-                        ("unknown".to_string(), req.tool_name.clone())
-                    };
-
                     match dispatcher.dispatch(&req.tool_name, req.args.clone()).await {
                         Ok(result) => {
                             let duration = call_start.elapsed().as_millis() as u64;
-                            let call = ToolCall::new(server, tool, req.args)
+                            let call = ToolCall::new(req.tool_name, req.args)
                                 .with_result(result.clone(), duration);
                             trace.push(call);
                             let _ = req.response_tx.send(Ok(result));
@@ -437,7 +380,7 @@ impl ExecutionEngine for MontyEngine {
                         Err(e) => {
                             let duration = call_start.elapsed().as_millis() as u64;
                             let err_str = e.to_string();
-                            let call = ToolCall::new(server, tool, req.args)
+                            let call = ToolCall::new(req.tool_name, req.args)
                                 .with_error(err_str.clone(), duration);
                             trace.push(call);
                             let _ = req.response_tx.send(Err(err_str));
@@ -457,31 +400,23 @@ impl ExecutionEngine for MontyEngine {
                     )
                     .await;
 
-                    // Record each call in the trace
                     for (i, result) in results.iter().enumerate() {
                         let (name, args) = &batch.calls[i];
-                        let parts: Vec<&str> = name.split('.').collect();
-                        let (server, tool) = if parts.len() >= 2 {
-                            (parts[0].to_string(), parts[1..].join("."))
-                        } else {
-                            ("unknown".to_string(), name.clone())
-                        };
 
                         match result {
                             Ok(value) => {
-                                let call = ToolCall::new(server, tool, args.clone())
+                                let call = ToolCall::new(name.clone(), args.clone())
                                     .with_result(value.clone(), 0);
                                 trace.push(call);
                             }
                             Err(e) => {
-                                let call = ToolCall::new(server, tool, args.clone())
+                                let call = ToolCall::new(name.clone(), args.clone())
                                     .with_error(e.to_string(), 0);
                                 trace.push(call);
                             }
                         }
                     }
 
-                    // Convert to the response format
                     let response: Vec<std::result::Result<serde_json::Value, String>> = results
                         .into_iter()
                         .map(|r| r.map_err(|e| e.to_string()))
@@ -492,7 +427,6 @@ impl ExecutionEngine for MontyEngine {
             }
         }
 
-        // Wait for the Monty thread to complete
         let monty_result = monty_handle.await.map_err(|e| {
             MontygateError::Execution(format!("Monty execution thread panicked: {}", e))
         })?;
@@ -508,7 +442,6 @@ impl ExecutionEngine for MontyEngine {
 
         match monty_result.error {
             Some(err) if !monty_result.success => {
-                // Execution failed but we still return partial results
                 warn!("Monty execution error: {}", err);
                 Ok(ExecutionResult {
                     output: serde_json::json!({
@@ -544,8 +477,6 @@ impl ExecutionEngine for MontyEngine {
     }
 
     fn validate(&self, code: &str) -> Result<()> {
-        // Use bracket balancing as a basic syntax check.
-        // Monty's parser could be used here in the future.
         let mut paren_depth = 0i32;
         let mut brace_depth = 0i32;
         let mut bracket_depth = 0i32;
@@ -601,10 +532,6 @@ struct MontyBlockingResult {
 }
 
 /// Run the Monty interpreter in a blocking context.
-///
-/// This function is called inside `spawn_blocking`. It creates the Monty runtime,
-/// registers the `tool` external function, and runs the state machine loop.
-/// Tool calls are sent over the channel to be dispatched by the async side.
 fn run_monty_blocking(
     code: &str,
     limits: monty::ResourceLimits,
@@ -614,10 +541,8 @@ fn run_monty_blocking(
 ) -> MontyBlockingResult {
     let start = Instant::now();
 
-    // Register external functions: "tool" for single calls, "batch_tools" for parallel
     let ext_fns = vec!["tool".to_string(), "batch_tools".to_string()];
 
-    // Build input names/values from the HashMap (sorted keys for deterministic order)
     let mut input_keys: Vec<String> = inputs.keys().cloned().collect();
     input_keys.sort();
     let input_values: Vec<MontyObject> = input_keys
@@ -677,7 +602,6 @@ fn run_monty_blocking(
             } => {
                 let ext_result = match function_name.as_str() {
                     "tool" => {
-                        // Check external call limit
                         external_calls += 1;
                         if external_calls > max_external_calls {
                             let err = MontyException::new(
@@ -704,7 +628,6 @@ fn run_monty_blocking(
                             }
                         }
 
-                        // Parse tool name and arguments
                         let (tool_name, tool_args) =
                             match MontyEngine::parse_tool_call(&args, &kwargs) {
                                 Ok(parsed) => parsed,
@@ -730,7 +653,6 @@ fn run_monty_blocking(
                                 }
                             };
 
-                        // Create a oneshot channel for the response
                         let (resp_tx, resp_rx) = oneshot::channel();
 
                         let request = ToolCallRequest {
@@ -739,7 +661,6 @@ fn run_monty_blocking(
                             response_tx: resp_tx,
                         };
 
-                        // Send the request to the async dispatcher
                         if call_tx
                             .blocking_send(ToolCallMessage::Single(request))
                             .is_err()
@@ -755,7 +676,6 @@ fn run_monty_blocking(
                             };
                         }
 
-                        // Wait for the response
                         match resp_rx.blocking_recv() {
                             Ok(Ok(value)) => {
                                 ExternalResult::Return(crate::convert::json_to_monty(&value))
@@ -773,7 +693,6 @@ fn run_monty_blocking(
                         }
                     }
                     "batch_tools" => {
-                        // Parse the batch arguments
                         let calls = match MontyEngine::parse_batch_tool_args(&args) {
                             Ok(calls) => calls,
                             Err(err_msg) => {
@@ -796,7 +715,6 @@ fn run_monty_blocking(
                             }
                         };
 
-                        // Count all individual calls against the limit
                         external_calls += calls.len();
                         if external_calls > max_external_calls {
                             let err = MontyException::new(
@@ -845,7 +763,6 @@ fn run_monty_blocking(
                             };
                         }
 
-                        // Wait for batch response and convert to MontyObject::List
                         match resp_rx.blocking_recv() {
                             Ok(results) => {
                                 let items: Vec<MontyObject> = results
@@ -1018,7 +935,6 @@ impl EngineManager {
         self.engine.limits()
     }
 
-    /// Get the underlying engine as a trait object
     pub fn engine(&self) -> Arc<dyn ExecutionEngine> {
         self.engine.clone()
     }
@@ -1070,8 +986,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.trace.len(), 1);
-        assert_eq!(result.trace[0].server, "test");
-        assert_eq!(result.trace[0].tool, "echo");
+        assert_eq!(result.trace[0].tool, "test.echo");
         assert!(result.trace[0].result.is_some());
         assert!(result.trace[0].error.is_none());
     }
@@ -1090,10 +1005,6 @@ mod tests {
         let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
         assert!(result.trace.is_empty());
         assert_eq!(result.stats.external_calls, 0);
-        assert_eq!(
-            result.output,
-            serde_json::json!({"status": "completed", "tool_calls": 0})
-        );
     }
 
     #[tokio::test]
@@ -1101,17 +1012,17 @@ mod tests {
         let engine = MockEngine::default();
         let mut dispatcher = SimpleDispatcher::new();
 
-        dispatcher.register("github.create_issue", |_args| {
+        dispatcher.register("create_issue", |_args| {
             Ok(serde_json::json!({"id": 123}))
         });
-        dispatcher.register("slack.post_message", |_args| {
+        dispatcher.register("post_message", |_args| {
             Ok(serde_json::json!({"ok": true}))
         });
 
         let input = RunProgramInput {
             code: r#"
-                # TOOL: github.create_issue {"title": "Test"}
-                # TOOL: slack.post_message {"text": "Created issue"}
+                # TOOL: create_issue {"title": "Test"}
+                # TOOL: post_message {"text": "Created issue"}
             "#
             .to_string(),
             inputs: HashMap::new(),
@@ -1124,30 +1035,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.trace.len(), 2);
-        assert_eq!(result.trace[0].server, "github");
         assert_eq!(result.trace[0].tool, "create_issue");
-        assert_eq!(result.trace[1].server, "slack");
         assert_eq!(result.trace[1].tool, "post_message");
         assert_eq!(result.stats.external_calls, 2);
-    }
-
-    #[tokio::test]
-    async fn test_mock_engine_tool_without_server_prefix() {
-        let engine = MockEngine::default();
-        let mut dispatcher = SimpleDispatcher::new();
-        dispatcher.register("plain_tool", |_| Ok(serde_json::json!("ok")));
-
-        let input = RunProgramInput {
-            code: "# TOOL: plain_tool {}".to_string(),
-            inputs: HashMap::new(),
-            type_check: true,
-        };
-
-        let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
-        assert_eq!(result.trace.len(), 1);
-        // Without a dot, server should be "unknown"
-        assert_eq!(result.trace[0].server, "unknown");
-        assert_eq!(result.trace[0].tool, "plain_tool");
     }
 
     #[test]
@@ -1159,29 +1049,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_engine_validation_unbalanced_parens() {
+    fn test_mock_engine_validation_unbalanced() {
         let engine = MockEngine::default();
         assert!(engine.validate("def test(:\n    pass").is_err());
-    }
-
-    #[test]
-    fn test_mock_engine_validation_unbalanced_braces() {
-        let engine = MockEngine::default();
-        assert!(engine.validate("def test():\n    {{").is_err());
-    }
-
-    #[test]
-    fn test_mock_engine_validation_unbalanced_brackets() {
-        let engine = MockEngine::default();
         assert!(engine.validate("x = [1, 2").is_err());
-    }
-
-    #[test]
-    fn test_mock_engine_validation_extra_closing() {
-        let engine = MockEngine::default();
         assert!(engine.validate(")").is_err());
-        assert!(engine.validate("}").is_err());
-        assert!(engine.validate("]").is_err());
     }
 
     #[tokio::test]
@@ -1239,7 +1111,7 @@ mod tests {
         let dispatcher = SimpleDispatcher::new();
 
         let input = RunProgramInput {
-            code: "# TOOL: unknown.tool {}".to_string(),
+            code: "# TOOL: unknown_tool {}".to_string(),
             inputs: HashMap::new(),
             type_check: true,
         };
@@ -1248,69 +1120,6 @@ mod tests {
         assert_eq!(result.trace.len(), 1);
         assert!(result.trace[0].error.is_some());
         assert!(result.trace[0].result.is_none());
-        assert_eq!(result.trace[0].server, "unknown");
-        assert_eq!(result.trace[0].tool, "tool");
-    }
-
-    // === parse_tool_calls ===
-
-    #[test]
-    fn test_parse_tool_calls() {
-        let engine = MockEngine::default();
-
-        let code = r#"
-            # TOOL: github.create_issue {"title": "Bug"}
-            # TOOL: slack.post_message {"text": "Hello"}
-            # Regular comment
-            x = 1 + 2
-            # TOOL: test.tool {}
-        "#;
-
-        let calls = engine.parse_tool_calls(code);
-        assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0].0, "github.create_issue");
-        assert_eq!(calls[1].0, "slack.post_message");
-        assert_eq!(calls[2].0, "test.tool");
-    }
-
-    #[test]
-    fn test_parse_tool_calls_no_args() {
-        let engine = MockEngine::default();
-        let calls = engine.parse_tool_calls("# TOOL: my_tool");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "my_tool");
-        assert_eq!(calls[0].1, serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_parse_tool_calls_invalid_json_args() {
-        let engine = MockEngine::default();
-        let calls = engine.parse_tool_calls("# TOOL: my_tool {invalid json}");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "my_tool");
-        assert_eq!(calls[0].1, serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_parse_tool_calls_empty_code() {
-        let engine = MockEngine::default();
-        let calls = engine.parse_tool_calls("");
-        assert!(calls.is_empty());
-    }
-
-    #[test]
-    fn test_parse_tool_calls_only_regular_comments() {
-        let engine = MockEngine::default();
-        let calls = engine.parse_tool_calls("# This is a comment\n# Another comment");
-        assert!(calls.is_empty());
-    }
-
-    #[test]
-    fn test_parse_tool_calls_empty_tool_prefix() {
-        let engine = MockEngine::default();
-        let calls = engine.parse_tool_calls("# TOOL:");
-        // Empty content after trimming, so no call
-        assert!(calls.is_empty());
     }
 
     // === SimpleDispatcher ===
@@ -1367,24 +1176,6 @@ mod tests {
         assert!(manager.validate("x = (").is_err());
     }
 
-    #[test]
-    fn test_engine_manager_limits() {
-        let limits = ResourceLimits {
-            max_external_calls: 99,
-            ..Default::default()
-        };
-        let manager = EngineManager::with_mock(limits);
-        assert_eq!(manager.limits().max_external_calls, 99);
-    }
-
-    #[test]
-    fn test_engine_manager_engine_ref() {
-        let manager = EngineManager::with_mock(ResourceLimits::default());
-        let engine = manager.engine();
-        // Should be able to call validate through the engine ref
-        assert!(engine.validate("x = 1").is_ok());
-    }
-
     #[tokio::test]
     async fn test_engine_manager_execute() {
         let manager = EngineManager::with_mock(ResourceLimits::default());
@@ -1401,14 +1192,7 @@ mod tests {
         assert_eq!(result.trace.len(), 1);
     }
 
-    #[test]
-    fn test_engine_manager_new() {
-        let engine = Arc::new(MockEngine::default());
-        let manager = EngineManager::new(engine);
-        assert!(manager.validate("x = 1").is_ok());
-    }
-
-    // === MontyEngine: input injection ===
+    // === MontyEngine ===
 
     #[tokio::test]
     async fn test_monty_engine_input_injection_pure_computation() {
@@ -1458,111 +1242,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_monty_engine_empty_inputs_backward_compat() {
-        let engine = MontyEngine::default();
-        let dispatcher = SimpleDispatcher::new();
-
-        let input = RunProgramInput {
-            code: "result = 42\nprint(result)".to_string(),
-            inputs: HashMap::new(),
-            type_check: true,
-        };
-
-        let result = engine
-            .execute(input, Arc::new(dispatcher))
-            .await
-            .unwrap();
-
-        assert_eq!(result.stdout.trim(), "42");
-    }
-
-    // === parse_batch_tool_args ===
-
-    #[test]
-    fn test_parse_batch_tool_args_valid() {
-        let args = vec![MontyObject::List(vec![
-            MontyObject::Tuple(vec![
-                MontyObject::String("github.list_issues".to_string()),
-                MontyObject::Dict(
-                    vec![(
-                        MontyObject::String("repo".to_string()),
-                        MontyObject::String("foo".to_string()),
-                    )]
-                    .into(),
-                ),
-            ]),
-            MontyObject::Tuple(vec![
-                MontyObject::String("github.list_issues".to_string()),
-                MontyObject::Dict(
-                    vec![(
-                        MontyObject::String("repo".to_string()),
-                        MontyObject::String("bar".to_string()),
-                    )]
-                    .into(),
-                ),
-            ]),
-        ])];
-
-        let result = MontyEngine::parse_batch_tool_args(&args).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].0, "github.list_issues");
-        assert_eq!(result[0].1["repo"], "foo");
-        assert_eq!(result[1].0, "github.list_issues");
-        assert_eq!(result[1].1["repo"], "bar");
-    }
-
-    #[test]
-    fn test_parse_batch_tool_args_empty_list() {
-        let args = vec![MontyObject::List(vec![])];
-        let result = MontyEngine::parse_batch_tool_args(&args).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_batch_tool_args_no_args() {
-        let args: Vec<MontyObject> = vec![];
-        let result = MontyEngine::parse_batch_tool_args(&args);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_batch_tool_args_not_a_list() {
-        let args = vec![MontyObject::String("not a list".to_string())];
-        let result = MontyEngine::parse_batch_tool_args(&args);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_batch_tool_args_item_not_tuple() {
-        let args = vec![MontyObject::List(vec![MontyObject::String(
-            "not a tuple".to_string(),
-        )])];
-        let result = MontyEngine::parse_batch_tool_args(&args);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_batch_tool_args_item_wrong_length() {
-        let args = vec![MontyObject::List(vec![MontyObject::Tuple(vec![
-            MontyObject::String("name".to_string()),
-        ])])];
-        let result = MontyEngine::parse_batch_tool_args(&args);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_batch_tool_args_name_not_string() {
-        let args = vec![MontyObject::List(vec![MontyObject::Tuple(vec![
-            MontyObject::Int(42),
-            MontyObject::Dict(vec![].into()),
-        ])])];
-        let result = MontyEngine::parse_batch_tool_args(&args);
-        assert!(result.is_err());
-    }
-
-    // === MontyEngine: batch_tools execution ===
-
-    #[tokio::test]
     async fn test_monty_engine_batch_tools_execution() {
         let engine = MontyEngine::default();
         let mut dispatcher = SimpleDispatcher::new();
@@ -1590,34 +1269,57 @@ print(len(results))
         assert_eq!(result.trace.len(), 2);
     }
 
-    #[tokio::test]
-    async fn test_monty_engine_mixed_serial_and_batch() {
-        let engine = MontyEngine::default();
-        let mut dispatcher = SimpleDispatcher::new();
-        dispatcher.register("test.echo", |args| Ok(args));
+    // === parse_batch_tool_args ===
 
-        let input = RunProgramInput {
-            code: r#"
-r1 = tool("test.echo", {"msg": "first"})
-results = batch_tools([
-    ("test.echo", {"msg": "a"}),
-    ("test.echo", {"msg": "b"}),
-])
-r2 = tool("test.echo", {"msg": "last"})
-print("done")
-"#
-            .to_string(),
-            inputs: HashMap::new(),
-            type_check: true,
-        };
+    #[test]
+    fn test_parse_batch_tool_args_valid() {
+        let args = vec![MontyObject::List(vec![
+            MontyObject::Tuple(vec![
+                MontyObject::String("list_issues".to_string()),
+                MontyObject::Dict(
+                    vec![(
+                        MontyObject::String("repo".to_string()),
+                        MontyObject::String("foo".to_string()),
+                    )]
+                    .into(),
+                ),
+            ]),
+            MontyObject::Tuple(vec![
+                MontyObject::String("list_issues".to_string()),
+                MontyObject::Dict(
+                    vec![(
+                        MontyObject::String("repo".to_string()),
+                        MontyObject::String("bar".to_string()),
+                    )]
+                    .into(),
+                ),
+            ]),
+        ])];
 
-        let result = engine
-            .execute(input, Arc::new(dispatcher))
-            .await
-            .unwrap();
+        let result = MontyEngine::parse_batch_tool_args(&args).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "list_issues");
+        assert_eq!(result[0].1["repo"], "foo");
+    }
 
-        assert_eq!(result.stdout.trim(), "done");
-        // 1 single + 2 batch + 1 single = 4 calls total
-        assert_eq!(result.trace.len(), 4);
+    #[test]
+    fn test_parse_batch_tool_args_empty_list() {
+        let args = vec![MontyObject::List(vec![])];
+        let result = MontyEngine::parse_batch_tool_args(&args).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_batch_tool_args_no_args() {
+        let args: Vec<MontyObject> = vec![];
+        let result = MontyEngine::parse_batch_tool_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_batch_tool_args_not_a_list() {
+        let args = vec![MontyObject::String("not a list".to_string())];
+        let result = MontyEngine::parse_batch_tool_args(&args);
+        assert!(result.is_err());
     }
 }

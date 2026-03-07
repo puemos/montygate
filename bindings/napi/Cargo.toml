@@ -1,0 +1,30 @@
+[package]
+name = "montygate-napi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NAPI-RS bindings for Montygate - use from Node.js/TypeScript"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+montygate-core = { path = "../../crates/montygate-core" }
+
+# NAPI-RS
+napi = { version = "3.8", features = ["async", "napi9", "serde-json"] }
+napi-derive = "3.5"
+
+# Workspace dependencies
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+[build-dependencies]
+napi-build = "2.3"

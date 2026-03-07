@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core library for Montygate - MCP server aggregation and Monty execution"
+description = "Core library for Montygate - framework-agnostic tool execution engine"
 
 [dependencies]
 # Workspace dependencies

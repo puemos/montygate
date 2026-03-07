@@ -1,0 +1,57 @@
+{
+  "name": "montygate",
+  "version": "0.1.0",
+  "description": "Register tools once, execute scripts that orchestrate multiple tool calls, return only the final result to the LLM",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "*.node",
+    "*.d.ts"
+  ],
+  "scripts": {
+    "build": "napi build --platform -p montygate-napi --manifest-path ../../Cargo.toml --no-js --dts montygate.d.ts -o . && tsup",
+    "build:napi": "napi build --platform -p montygate-napi --manifest-path ../../Cargo.toml --no-js --dts montygate.d.ts -o .",
+    "build:napi:release": "napi build --platform --release -p montygate-napi --manifest-path ../../Cargo.toml --no-js --dts montygate.d.ts -o .",
+    "build:ts": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@napi-rs/cli": "^3.0.0",
+    "@types/node": "^25.3.5",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "napi": {
+    "binaryName": "montygate",
+    "package": {
+      "name": "@montygate/binding"
+    },
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/puemos/montygate"
+  }
+}

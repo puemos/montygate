@@ -1,6 +1,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-1.85+-orange?logo=rust" alt="Rust 1.85+" />
-  <img src="https://img.shields.io/badge/MCP-compatible-blue" alt="MCP Compatible" />
+  <img src="https://img.shields.io/badge/npm-montygate-blue?logo=npm" alt="npm" />
   <a href="https://github.com/puemos/montygate/actions"><img src="https://img.shields.io/github/actions/workflow/status/puemos/montygate/ci.yml?branch=main&label=CI" alt="CI" /></a>
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green" alt="License" /></a>
 </p>
@@ -8,274 +8,304 @@
 <h1 align="center">Montygate</h1>
 
 <p align="center">
-  Aggregate N downstream MCP servers into a single <code>run_program</code> tool.<br>
-  The LLM writes Python. Montygate executes it in a sandbox.
+  Register tools once, execute scripts that orchestrate them, return one result.<br>
+  A Rust + TypeScript library for sandboxed multi-tool orchestration.
 </p>
 
 ---
 
 ## Why
 
-Every MCP tool call is a full LLM round-trip. Wire up three servers and a simple workflow becomes five sequential calls.
+Every tool call is a full LLM round-trip. Wire up a few tools and a simple workflow becomes five sequential calls, each burning tokens and latency.
 
-Montygate collapses them. It sits between the LLM and your downstream MCP servers, exposing one tool: `run_program`. The LLM sends a Python script that can call any downstream tool via `tool()`, run them in parallel via `batch_tools()`, and use variables, loops, and conditionals to glue results together. N calls, one round-trip.
+Montygate collapses them. You register tools in TypeScript, and the LLM writes a short Python script that calls any of them via `tool()`, runs independent calls in parallel via `batch_tools()`, and glues results with variables, loops, and conditionals. N tool calls, one round-trip.
 
 ```
  ┌──────────────────────────────────────────────────┐
- │  MCP Client (Claude Desktop, Cursor, Claude Code) │
- │  Sees: 1 tool → run_program                       │
+ │  Your App (Anthropic, OpenAI, Vercel AI, etc.)    │
+ │  Sees: 2 tools -> execute + search                │
  └──────────────────┬─────────────────────────────────┘
-                    │ MCP protocol
-                    ▼
+                    │ function call
+                    v
  ┌──────────────────────────────────────────────────┐
  │                  Montygate                        │
  │                                                   │
- │  ┌────────────┐ ┌─────────────┐ ┌─────────────┐  │
- │  │ MCP Server │ │ Monty Engine│ │Tool Registry │  │
- │  │ (upstream) │ │ (sandboxed) │ │+ Policy      │  │
- │  └────────────┘ └─────────────┘ └─────────────┘  │
- │                                                   │
+ │  ┌─────────────┐ ┌─────────────┐ ┌────────────┐  │
+ │  │ Monty Engine│ │Tool Registry │ │  Policy    │  │
+ │  │ (sandboxed) │ │ + Search    │ │  + Limits  │  │
+ │  └──────┬──────┘ └─────────────┘ └────────────┘  │
+ │         │                                         │
+ │         │  tool('create_issue', title='Bug')      │
+ │         v                                         │
  │  ┌───────────────────────────────────────────┐    │
- │  │      MCP Client Pool (downstream)         │    │
+ │  │      Your tool callbacks (JS/TS)          │    │
  │  │  ┌────────┐ ┌─────────┐ ┌──────────────┐ │    │
- │  │  │ GitHub │ │Postgres │ │ Google Drive  │ │    │
+ │  │  │ GitHub │ │ DB      │ │ Slack        │ │    │
  │  │  └────────┘ └─────────┘ └──────────────┘ │    │
  │  └───────────────────────────────────────────┘    │
  └──────────────────────────────────────────────────┘
 ```
 
-## Examples
-
-**Sequential calls with data flowing between them:**
-
-```python
-transcript = tool("gdrive.get_document", document_id="abc123")
-summary = transcript[:500]
-
-tool("salesforce.update_record",
-    object_type="Lead", record_id="xyz",
-    data={"notes": summary})
-
-tool("slack.post_message",
-    channel="#sales",
-    text=f"Updated lead with {len(transcript)} char transcript")
-```
-
-**Parallel dispatch when calls are independent:**
-
-```python
-results = batch_tools([
-    ("github.list_issues", {"repo": "foo/bar"}),
-    ("github.list_issues", {"repo": "foo/baz"}),
-    ("slack.list_channels", {}),
-])
-```
-
-**Input variables to avoid inlining large values:**
-
-```json
-{
-  "code": "result = tool('github.search', query=search_term, limit=max_results)",
-  "inputs": {"search_term": "montygate", "max_results": 10}
-}
-```
-
-> **Note:** Tool schemas are still sent to the LLM (in the `run_program` description), so the up-front token cost is relocated rather than eliminated. The wins are **batch execution** (N calls in 1 round-trip) and **programmatic orchestration** (conditionals, loops, data transformation).
+Works with any LLM framework via built-in adapters for Anthropic, OpenAI, and Vercel AI SDK.
 
 ## Quick Start
 
-### Install
-
 ```bash
-cargo install --git https://github.com/puemos/montygate.git montygate-cli
+npm install montygate
 ```
 
-### Configure
+```typescript
+import { Montygate } from "montygate";
+import { z } from "zod";
 
-```bash
-montygate config init
+const gate = new Montygate();
 
-montygate server add github \
-  --transport stdio \
-  --command npx \
-  --args "-y,@modelcontextprotocol/server-github" \
-  --env "GITHUB_TOKEN=${GITHUB_TOKEN}"
+gate.tool("lookup_order", {
+  description: "Look up order details by order ID",
+  params: z.object({ order_id: z.string() }),
+  run: async ({ order_id }) => db.orders.find(order_id),
+});
 
-montygate server add postgres \
-  --transport stdio \
-  --command npx \
-  --args "-y,@modelcontextprotocol/server-postgres"
+gate.tool("create_ticket", {
+  description: "Create a support ticket",
+  params: z.object({ subject: z.string(), body: z.string() }),
+  run: async ({ subject, body }) => tickets.create({ subject, body }),
+});
+
+const result = await gate.execute(`
+order = tool('lookup_order', order_id='ORD-123')
+ticket = tool('create_ticket',
+  subject='Late order ' + order['id'],
+  body='Customer ' + order['email'] + ' has a late order'
+)
+ticket
+`);
+
+console.log(result.output); // Only this goes back to the LLM
 ```
 
-### Run
+### Use with an LLM adapter
 
-```bash
-montygate run                 # Start (stdio transport)
-montygate run --list-tools    # Show discovered tools
-montygate run --test-config   # Validate config and exit
-```
+```typescript
+import { Montygate, toAnthropic, handleAnthropicToolCall } from "montygate";
+import Anthropic from "@anthropic-ai/sdk";
 
-### Connect to an MCP Client
+const gate = new Montygate();
+// ... register tools ...
 
-Add to your Claude Desktop / Cursor / Claude Code config:
+const client = new Anthropic();
+const tools = toAnthropic(gate);
 
-```json
-{
-  "mcpServers": {
-    "montygate": {
-      "command": "montygate",
-      "args": ["run"]
-    }
+const response = await client.messages.create({
+  model: "claude-sonnet-4-20250514",
+  max_tokens: 1024,
+  tools,
+  messages: [{ role: "user", content: "Look up order ORD-123 and create a ticket" }],
+});
+
+for (const block of response.content) {
+  if (block.type === "tool_use") {
+    const result = await handleAnthropicToolCall(gate, block.name, block.input);
+    // Send result back to Claude...
   }
 }
 ```
 
+## Examples
+
+### Sequential calls with data flowing between them
+
+```python
+order = tool('lookup_order', order_id='ORD-123')
+summary = order['email'] + ': ' + str(order['items'])
+
+tool('create_ticket',
+    subject='Late order ' + order['id'],
+    body=summary)
+
+tool('send_email',
+    to=order['email'],
+    subject='Ticket created',
+    text=f"Created ticket for order {order['id']}")
+```
+
+### Parallel dispatch when calls are independent
+
+```python
+results = batch_tools([
+    ('get_weather', {'city': 'New York'}),
+    ('get_weather', {'city': 'London'}),
+    ('get_forecast', {'city': 'New York', 'days': 3}),
+])
+```
+
+### Input variables to avoid inlining large values
+
+```typescript
+const result = await gate.execute(
+  `result = tool('search_docs', query=search_term, limit=max_results)`,
+  { search_term: "authentication", max_results: 10 }
+);
+```
+
+### Tool discovery via keyword search
+
+```typescript
+const results = gate.search("create issue", 3);
+// Returns matching tool definitions with names, descriptions, and input schemas
+```
+
 ## Configuration
 
-All config lives in `~/.montygate/config.toml`. Override with `--config <path>`.
+All configuration is programmatic via the `MontygateConfig` object:
 
-### Servers
+```typescript
+const gate = new Montygate({
+  // Retry with exponential backoff for transient errors
+  retry: {
+    maxRetries: 3,
+    baseDelayMs: 100, // 100ms, 200ms, 400ms, ...
+  },
 
-```toml
-# Stdio (spawn a child process)
-[[servers]]
-name = "github"
-[servers.transport]
-type = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-[servers.transport.env]
-GITHUB_TOKEN = "${GITHUB_TOKEN}"
+  // Execution limits
+  limits: {
+    timeoutMs: 30_000,
+    maxConcurrent: 5,
+  },
 
-# SSE (connect to a running server)
-[[servers]]
-name = "remote"
-[servers.transport]
-type = "sse"
-url = "http://localhost:3001/sse"
+  // Sandbox resource limits
+  resourceLimits: {
+    maxExecutionTimeMs: 30_000,
+    maxMemoryBytes: 52_428_800, // 50 MB
+    maxStackDepth: 100,
+    maxExternalCalls: 50,
+    maxCodeLength: 10_000,
+  },
 
-# Streamable HTTP
-[[servers]]
-name = "api"
-[servers.transport]
-type = "streamable_http"
-url = "http://localhost:8080/mcp"
+  // Policy: first matching rule wins
+  policy: {
+    defaultAction: "allow",
+    rules: [
+      { matchPattern: "*.delete_*", action: "deny" },
+      { matchPattern: "github.*", action: "allow", rateLimit: "20/min" },
+      { matchPattern: "salesforce.update_record", action: "require_approval" },
+    ],
+  },
+});
 ```
 
-### Resource Limits
+### Policy rules
 
-```toml
-[limits]
-max_execution_time_ms = 30000    # Default: 30s
-max_memory_bytes = 52428800      # Default: 50MB
-max_stack_depth = 100
-max_external_calls = 50
-max_code_length = 10000
+Rules are evaluated top-to-bottom; first match wins. Patterns support:
+
+- `create_issue` -- exact tool name
+- `github.*` -- all tools matching a prefix (when using dotted names)
+- `*.delete_*` -- wildcard across tool names
+
+Rate limits: `N/sec`, `N/min`, `N/hour`, `N/day`.
+
+## Adapters
+
+Adapters convert a `Montygate` instance into tool definitions for your LLM framework. Each adapter exposes two tools to the LLM: `execute` (run a Python script) and `search` (discover tools by keyword).
+
+### Anthropic
+
+```typescript
+import { toAnthropic, handleAnthropicToolCall } from "montygate";
+
+const tools = toAnthropic(gate);  // AnthropicTool[]
+
+// In the tool-use loop:
+const result = await handleAnthropicToolCall(gate, block.name, block.input);
 ```
 
-### Retry
+### OpenAI
 
-Retries use exponential backoff and only trigger on transient errors (connection reset, timeout, broken pipe, connection refused, stream closed).
+```typescript
+import { toOpenAI, handleOpenAIToolCall } from "montygate";
 
-```toml
-[retry]
-max_retries = 3
-retry_base_delay_ms = 100        # Backoff: 100ms, 200ms, 400ms, ...
-connection_timeout_secs = 30
-request_timeout_secs = 60
+const tools = toOpenAI(gate);  // OpenAITool[]
+
+// In the tool-call loop:
+const result = await handleOpenAIToolCall(gate, call.function.name, call.function.arguments);
 ```
 
-### Policy
+### Vercel AI SDK
 
-Rules are evaluated top-to-bottom. First match wins.
+```typescript
+import { toVercelAI } from "montygate";
 
-```toml
-[policy.defaults]
-action = "allow"
+const tools = toVercelAI(gate);  // Record<string, VercelAIToolDef>
 
-[[policy.rules]]
-match_pattern = "*.delete_*"                   # Block all delete operations
-action = "deny"
-
-[[policy.rules]]
-match_pattern = "github.*"                     # Rate-limit all GitHub tools
-action = "allow"
-rate_limit = "20/min"
-
-[[policy.rules]]
-match_pattern = "salesforce.update_record"     # Require human approval
-action = "require_approval"
+// Pass directly to generateText / streamText:
+const { text } = await generateText({
+  model: anthropic("claude-sonnet-4-20250514"),
+  tools,
+  prompt: "Search docs and summarize results",
+});
 ```
-
-Patterns: `server.tool` (exact), `server.*` (all tools from server), `*.tool_*` (across servers). Rate limits: `N/sec`, `N/min`, `N/hour`, `N/day`.
 
 ## Python Subset
 
-Montygate uses the [Monty interpreter](https://github.com/pydantic/monty) (v0.0.4), a sandboxed Python implementation in Rust. Supports variables, arithmetic, strings, lists, dicts, control flow, function definitions, f-strings, try/except, comprehensions, slicing, `print()`, `tool()`, and `batch_tools()`. No `import` or user-defined classes.
+Montygate uses the [Monty interpreter](https://github.com/pydantic/monty) (v0.0.4), a sandboxed Python implementation in Rust. No filesystem, network, or import access.
 
-See [docs/python-support.md](docs/python-support.md) for the full reference.
+**Supported:** variables, arithmetic, strings, lists, dicts, tuples, control flow (`if`/`elif`/`else`, `for`, `while`), function definitions, f-strings, try/except, list/dict/set comprehensions, slicing, `print()`, `tool()`, `batch_tools()`.
+
+**Not supported:** `import`, user-defined classes, standard library modules.
 
 ## Architecture
 
 ```
 montygate/
 ├── crates/
-│   ├── montygate-core/       # Engine, bridge, registry, policy, types
-│   ├── montygate-mcp/        # MCP server (upstream) + client pool (downstream)
-│   └── montygate-cli/        # CLI binary + config management
+│   ├── montygate-core/    # Engine, registry, policy, scheduler, observability
+│   └── montygate-napi/    # Node.js native bindings (NAPI-RS)
+└── packages/
+    └── montygate/         # TypeScript SDK + adapters
 ```
 
-**Tool Registry** discovers and namespaces downstream tools (`server.tool_name`) with auto-generated Python type stubs. **Policy Engine** enforces per-tool allow/deny/require-approval rules with wildcards and rate limiting. **Execution Engine** runs sandboxed Python via Monty, with input variable injection and `batch_tools()` parallel dispatch. **Bridge** connects execution to MCP dispatch, resolving tools, checking policies, and recording traces. **Client Pool** manages downstream connections with retry and exponential backoff.
+| Component | Description |
+|---|---|
+| **Engine** | Sandboxed Python execution via Monty with `tool()` and `batch_tools()` builtins |
+| **Registry** | Tool catalog with keyword substring search and relevance scoring |
+| **Policy** | Allow/deny/require-approval rules with wildcards and rate limiting |
+| **Scheduler** | Concurrency limits, timeout, retry with exponential backoff |
+| **Tracer** | Execution audit trail recording every tool call, duration, and retries |
 
 ```
-run_program(code="...", inputs={...})
-  → Engine parses + runs Python
-    → tool("github.create_issue", title="Bug")
-    │   → Registry resolves → Policy checks → Client dispatches (with retry)
-    │
-    → batch_tools([("a.x", {}), ("b.y", {})])
-        → All calls dispatched concurrently → Results returned as list
+execute(code, inputs)
+  -> Engine parses + runs Python
+    -> tool('create_issue', title='Bug')
+    |   -> Registry resolves -> Policy checks -> Scheduler dispatches (with retry)
+    |
+    -> batch_tools([('a', {}), ('b', {})])
+        -> All calls dispatched concurrently -> Results returned as list
 ```
 
 ## Security
 
-- **Sandboxed Execution** -- No filesystem, network, or environment access
-- **Policy Engine** -- Per-tool allow/deny/rate-limit evaluated before every call
-- **Resource Limits** -- CPU time, memory, stack depth, and call count bounded
-- **Audit Trail** -- Every tool call recorded in the execution trace
-- **Type Stubs** -- Auto-generated from JSON schemas for well-typed calls
-
-## CLI Reference
-
-```
-montygate [OPTIONS] <COMMAND>
-
-Options:
-  -c, --config <FILE>     Config file path [default: ~/.montygate/config.toml]
-  -l, --log-level <LEVEL> Log level [default: info]
-
-Commands:
-  run                     Start the MCP server
-    -t, --transport       stdio | sse | http [default: stdio]
-    --host / --port       For SSE/HTTP [default: 127.0.0.1:8080]
-    --test-config         Validate and exit
-    --list-tools          Show available tools and exit
-  server add|remove|list|edit|test <NAME>
-  config init|show|validate
-```
+- **Sandboxed execution** -- No filesystem, network, or environment access from scripts
+- **Policy engine** -- Per-tool allow/deny/rate-limit evaluated before every call
+- **Resource limits** -- CPU time, memory, stack depth, and call count bounded
+- **Audit trail** -- Every tool call recorded in the execution trace
 
 ## Development
 
 ```bash
-cargo build --release     # Build
-cargo test                # Run all tests
-cargo clippy && cargo fmt # Lint + format
+# Rust
+cargo build --release
+cargo test
+cargo clippy && cargo fmt
+
+# TypeScript SDK
+pnpm install
+pnpm build
+pnpm test
 ```
 
 ## Roadmap
 
-- [ ] Full rmcp client integration for downstream tool calls
-- [ ] Snapshot-based execution persistence (pause/resume)
+- [ ] Python SDK
 - [ ] WebAssembly build for browser deployment
 
 ## Contributing
@@ -291,6 +321,5 @@ cargo clippy && cargo fmt # Lint + format
 
 ## Acknowledgments
 
-- [rmcp](https://crates.io/crates/rmcp) -- MCP SDK for Rust
 - [Monty](https://github.com/pydantic/monty) -- Sandboxed Python interpreter by Pydantic
-- [Model Context Protocol](https://modelcontextprotocol.io) by Anthropic
+- [Model Context Protocol](https://modelcontextprotocol.io) by Anthropic -- inspiration for the tool orchestration pattern
