@@ -126,28 +126,27 @@ gate.tool("lookup_order", {
 });
 ```
 
-### Use with an LLM adapter
+### Use with an LLM
 
 ```typescript
-import { Montygate, toAnthropic, handleAnthropicToolCall } from "montygate";
+import { Montygate } from "montygate";
 import Anthropic from "@anthropic-ai/sdk";
 
 const gate = new Montygate();
 // ... register tools ...
 
 const client = new Anthropic();
-const tools = toAnthropic(gate);
 
 const response = await client.messages.create({
   model: "claude-sonnet-4-20250514",
   max_tokens: 1024,
-  tools,
+  tools: gate.anthropic(),
   messages: [{ role: "user", content: "Look up order ORD-123 and create a ticket" }],
 });
 
 for (const block of response.content) {
   if (block.type === "tool_use") {
-    const result = await handleAnthropicToolCall(gate, block.name, block.input);
+    const result = await gate.handleToolCall(block.name, block.input);
     // Send result back to Claude...
   }
 }
@@ -276,43 +275,44 @@ Rules are evaluated top-to-bottom; first match wins. Patterns support:
 
 Rate limits: `N/sec`, `N/min`, `N/hour`, `N/day`.
 
-## Adapters
+## LLM Integration
 
-Adapters convert a `Montygate` instance into tool definitions for your LLM framework. Each adapter exposes two tools to the LLM: `execute` (run a Python script) and `search` (discover tools by keyword).
+Each method returns tool definitions in the right format + `handleToolCall()` dispatches calls back. Two tools are exposed to the LLM: `execute` (run a Python script) and `search` (discover tools by keyword).
 
 ### Anthropic
 
 ```typescript
-import { toAnthropic, handleAnthropicToolCall } from "montygate";
+const response = await client.messages.create({
+  tools: gate.anthropic(),
+  messages,
+});
 
-const tools = toAnthropic(gate);  // AnthropicTool[]
-
-// In the tool-use loop:
-const result = await handleAnthropicToolCall(gate, block.name, block.input);
+for (const block of response.content) {
+  if (block.type === "tool_use") {
+    const result = await gate.handleToolCall(block.name, block.input);
+  }
+}
 ```
 
 ### OpenAI
 
 ```typescript
-import { toOpenAI, handleOpenAIToolCall } from "montygate";
+const response = await client.chat.completions.create({
+  tools: gate.openai(),
+  messages,
+});
 
-const tools = toOpenAI(gate);  // OpenAITool[]
-
-// In the tool-call loop:
-const result = await handleOpenAIToolCall(gate, call.function.name, call.function.arguments);
+for (const call of response.choices[0].message.tool_calls ?? []) {
+  const result = await gate.handleToolCall(call.function.name, call.function.arguments);
+}
 ```
 
 ### Vercel AI SDK
 
 ```typescript
-import { toVercelAI } from "montygate";
-
-const tools = toVercelAI(gate);  // Record<string, VercelAIToolDef>
-
-// Pass directly to generateText / streamText:
 const { text } = await generateText({
   model: anthropic("claude-sonnet-4-20250514"),
-  tools,
+  tools: gate.vercelai(),
   prompt: "Search docs and summarize results",
 });
 ```
