@@ -4,13 +4,14 @@
  * This shows how to wrap existing Vercel AI-style tools directly —
  * no need to rewrite schemas. Montygate auto-detects the format.
  */
-import { Montygate, toVercelAI } from "montygate";
+import { Montygate } from "montygate";
 import { z } from "zod";
 // import { generateText } from "ai";
 // import { anthropic } from "@ai-sdk/anthropic";
 
 // Your existing Vercel AI-style tools — pass them straight to Montygate
-const myVercelTools = {
+const gate = new Montygate();
+gate.tools({
   search_docs: {
     description: "Search documentation by query",
     parameters: z.object({ query: z.string(), limit: z.number().optional() }),
@@ -35,21 +36,10 @@ const myVercelTools = {
       };
     },
   },
-};
+});
 
-// Just wrap your existing tools — handlers are already embedded
-const engine = new Montygate();
-engine.tools(myVercelTools);
-
-// Alternative: register tools one-by-one with Zod schemas (still supported)
-// engine.tool("search_docs", {
-//   description: "Search documentation by query",
-//   params: z.object({ query: z.string(), limit: z.number().optional() }),
-//   run: async ({ query, limit }) => ({ results: [...] }),
-// });
-
-// Get Vercel AI SDK-compatible tools
-const tools = toVercelAI(engine);
+// Get Vercel AI SDK-compatible tools for the LLM
+const tools = gate.vercelai();
 console.log("Tool names:", Object.keys(tools));
 console.log("Execute description:", tools.execute.description.slice(0, 100) + "...");
 
@@ -57,7 +47,7 @@ console.log("Execute description:", tools.execute.description.slice(0, 100) + ".
 //
 // const { text, toolResults } = await generateText({
 //   model: anthropic("claude-sonnet-4-20250514"),
-//   tools,
+//   tools: gate.vercelai(),
 //   prompt: "Search for authentication docs and summarize the results",
 // });
 
