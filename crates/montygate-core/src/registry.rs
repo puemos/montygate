@@ -16,7 +16,7 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: Arc::new(DashMap::new()),
-            name_pattern: Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").unwrap(),
+            name_pattern: Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]*$").unwrap(),
         }
     }
 
@@ -25,7 +25,7 @@ impl ToolRegistry {
         if !self.name_pattern.is_match(&definition.name) {
             warn!("Skipping tool '{}': invalid name", definition.name);
             return Err(MontygateError::Validation(format!(
-                "Invalid tool name: '{}'. Must match [a-zA-Z_][a-zA-Z0-9_]*",
+                "Invalid tool name: '{}'. Must match [a-zA-Z_][a-zA-Z0-9_-]*",
                 definition.name
             )));
         }
@@ -813,13 +813,26 @@ mod tests {
     fn test_invalid_tool_name() {
         let registry = ToolRegistry::new();
         let result = registry.register_tool(ToolDefinition {
-            name: "invalid-tool-name!".to_string(),
+            name: "invalid tool name!".to_string(),
             description: Some("Invalid".to_string()),
             input_schema: serde_json::json!({}),
             output_schema: None,
         });
         assert!(result.is_err());
         assert_eq!(registry.tool_count(), 0);
+    }
+
+    #[test]
+    fn test_hyphenated_tool_name() {
+        let registry = ToolRegistry::new();
+        let result = registry.register_tool(ToolDefinition {
+            name: "get-weather".to_string(),
+            description: Some("Get weather".to_string()),
+            input_schema: serde_json::json!({}),
+            output_schema: None,
+        });
+        assert!(result.is_ok());
+        assert!(registry.has_tool("get-weather"));
     }
 
     #[test]
