@@ -54,22 +54,45 @@ Works with any LLM framework via built-in adapters for Anthropic, OpenAI, and Ve
 npm install montygate
 ```
 
+### Bring your existing tools
+
+Already have OpenAI, Anthropic, or Vercel AI tool definitions? Pass them directly — Montygate auto-detects the format:
+
 ```typescript
 import { Montygate } from "montygate";
-import { z } from "zod";
 
-const gate = new Montygate();
-
-gate.tool("lookup_order", {
-  description: "Look up order details by order ID",
-  params: z.object({ order_id: z.string() }),
-  run: async ({ order_id }) => db.orders.find(order_id),
-});
-
-gate.tool("create_ticket", {
-  description: "Create a support ticket",
-  params: z.object({ subject: z.string(), body: z.string() }),
-  run: async ({ subject, body }) => tickets.create({ subject, body }),
+// Your existing OpenAI tools — no rewriting needed
+const gate = new Montygate({
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: "lookup_order",
+        description: "Look up order details by order ID",
+        parameters: {
+          type: "object",
+          properties: { order_id: { type: "string" } },
+          required: ["order_id"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "create_ticket",
+        description: "Create a support ticket",
+        parameters: {
+          type: "object",
+          properties: { subject: { type: "string" }, body: { type: "string" } },
+          required: ["subject", "body"],
+        },
+      },
+    },
+  ],
+  handlers: {
+    lookup_order: async (args) => db.orders.find(args.order_id),
+    create_ticket: async (args) => tickets.create(args),
+  },
 });
 
 const result = await gate.execute(`
@@ -82,6 +105,25 @@ ticket
 `);
 
 console.log(result.output); // Only this goes back to the LLM
+```
+
+Works with Anthropic tools (`name` + `input_schema`), Vercel AI tools (object with `execute`), and more. See [Supported Formats](#supported-formats).
+
+### Register with Zod schemas
+
+Prefer typed schemas? The `.tool()` method still works:
+
+```typescript
+import { Montygate } from "montygate";
+import { z } from "zod";
+
+const gate = new Montygate();
+
+gate.tool("lookup_order", {
+  description: "Look up order details by order ID",
+  params: z.object({ order_id: z.string() }),
+  run: async ({ order_id }) => db.orders.find(order_id),
+});
 ```
 
 ### Use with an LLM adapter
@@ -153,6 +195,36 @@ const result = await gate.execute(
 ```typescript
 const results = gate.search("create issue", 3);
 // Returns matching tool definitions with names, descriptions, and input schemas
+```
+
+## Supported Formats
+
+`tools()` auto-detects these formats:
+
+| Format | Detection signature | Handler source |
+|--------|---------------------|----------------|
+| OpenAI Chat Completions | `type === "function"` + `.function.name` | handler map |
+| OpenAI Responses API | `type === "function"` + `.name` (flat) | handler map |
+| Anthropic Messages API | `.name` + `.input_schema` | handler map |
+| Anthropic `betaZodTool` | `.name` + `.inputSchema` (Zod) + `.run` | embedded `.run` |
+| OpenAI Agents SDK | `.name` + `.parameters` + `.execute` | embedded `.execute` |
+| Vercel AI SDK | `.description` + `.execute` (no `.name`) | embedded `.execute` |
+
+```typescript
+// Array of tools + handler map (OpenAI, Anthropic raw)
+gate.tools(openaiTools, { get_weather: handler });
+
+// Object keyed by name (Vercel AI style — handlers embedded)
+gate.tools({ weather: vercelTool, search: vercelTool2 });
+
+// Chain from multiple sources
+gate
+  .tools(openaiTools, handlers)
+  .tools(vercelAITools)
+  .tool("custom", { params: z.object({...}), run });
+
+// Constructor shorthand
+new Montygate({ tools: openaiTools, handlers: { get_weather: handler } });
 ```
 
 ## Configuration

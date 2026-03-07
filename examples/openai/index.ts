@@ -1,34 +1,67 @@
 /**
  * Example: Using Montygate with the OpenAI SDK.
  *
- * This shows how to convert registered tools into OpenAI-compatible
- * function tool definitions and handle tool calls.
+ * This shows how to wrap existing OpenAI tool definitions directly —
+ * no need to rewrite schemas. Montygate auto-detects the format.
  */
 import { Montygate, toOpenAI, handleOpenAIToolCall } from "montygate";
-import { z } from "zod";
 // import OpenAI from "openai";
 
+// Your existing OpenAI tool definitions — pass them straight to Montygate
+const myOpenAITools = [
+  {
+    type: "function" as const,
+    function: {
+      name: "get_weather",
+      description: "Get current weather for a city",
+      parameters: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "get_forecast",
+      description: "Get 5-day forecast for a city",
+      parameters: {
+        type: "object",
+        properties: {
+          city: { type: "string" },
+          days: { type: "number" },
+        },
+        required: ["city"],
+      },
+    },
+  },
+];
+
+// Just wrap your existing tools + provide handlers
 const engine = new Montygate();
-
-engine.tool("get_weather", {
-  description: "Get current weather for a city",
-  params: z.object({ city: z.string() }),
-  run: async ({ city }) => ({
-    city,
-    temp: 72,
-    condition: "sunny",
-  }),
+engine.tools(myOpenAITools, {
+  get_weather: async (args: unknown) => {
+    const { city } = args as { city: string };
+    return { city, temp: 72, condition: "sunny" };
+  },
+  get_forecast: async (args: unknown) => {
+    const { city, days } = args as { city: string; days?: number };
+    return {
+      city,
+      days: days ?? 5,
+      forecast: ["sunny", "cloudy", "rain", "sunny", "sunny"],
+    };
+  },
 });
 
-engine.tool("get_forecast", {
-  description: "Get 5-day forecast for a city",
-  params: z.object({ city: z.string(), days: z.number().optional() }),
-  run: async ({ city, days }) => ({
-    city,
-    days: days ?? 5,
-    forecast: ["sunny", "cloudy", "rain", "sunny", "sunny"],
-  }),
-});
+// Alternative: register tools one-by-one with Zod schemas (still supported)
+// import { z } from "zod";
+// engine.tool("get_weather", {
+//   description: "Get current weather for a city",
+//   params: z.object({ city: z.string() }),
+//   run: async ({ city }) => ({ city, temp: 72, condition: "sunny" }),
+// });
 
 // Get OpenAI-compatible tool definitions
 const tools = toOpenAI(engine);

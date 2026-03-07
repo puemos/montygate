@@ -1,34 +1,57 @@
 /**
  * Example: Using Montygate with the Anthropic SDK.
  *
- * This shows how to convert registered tools into Anthropic-compatible
- * tool definitions and handle tool calls from Claude.
+ * This shows how to wrap existing Anthropic tool definitions directly —
+ * no need to rewrite schemas. Montygate auto-detects the format.
  */
 import { Montygate, toAnthropic, handleAnthropicToolCall } from "montygate";
-import { z } from "zod";
 // import Anthropic from "@anthropic-ai/sdk";
 
+// Your existing Anthropic tool definitions — pass them straight to Montygate
+const myAnthropicTools = [
+  {
+    name: "lookup_order",
+    description: "Look up order details by order ID",
+    input_schema: {
+      type: "object",
+      properties: { order_id: { type: "string" } },
+      required: ["order_id"],
+    },
+  },
+  {
+    name: "create_ticket",
+    description: "Create a support ticket",
+    input_schema: {
+      type: "object",
+      properties: {
+        subject: { type: "string" },
+        body: { type: "string" },
+      },
+      required: ["subject", "body"],
+    },
+  },
+];
+
+// Just wrap your existing tools + provide handlers
 const engine = new Montygate();
-
-engine.tool("lookup_order", {
-  description: "Look up order details by order ID",
-  params: z.object({ order_id: z.string() }),
-  run: async ({ order_id }) => ({
-    id: order_id,
-    status: "shipped",
-    email: "customer@example.com",
-  }),
+engine.tools(myAnthropicTools, {
+  lookup_order: async (args: unknown) => {
+    const { order_id } = args as { order_id: string };
+    return { id: order_id, status: "shipped", email: "customer@example.com" };
+  },
+  create_ticket: async (args: unknown) => {
+    const { subject, body } = args as { subject: string; body: string };
+    return { ticket_id: `TKT-${Date.now()}`, subject, body };
+  },
 });
 
-engine.tool("create_ticket", {
-  description: "Create a support ticket",
-  params: z.object({ subject: z.string(), body: z.string() }),
-  run: async ({ subject, body }) => ({
-    ticket_id: `TKT-${Date.now()}`,
-    subject,
-    body,
-  }),
-});
+// Alternative: register tools one-by-one with Zod schemas (still supported)
+// import { z } from "zod";
+// engine.tool("lookup_order", {
+//   description: "Look up order details by order ID",
+//   params: z.object({ order_id: z.string() }),
+//   run: async ({ order_id }) => ({ id: order_id, status: "shipped", email: "customer@example.com" }),
+// });
 
 // Get Anthropic-compatible tool definitions
 const tools = toAnthropic(engine);
