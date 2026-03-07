@@ -17,6 +17,9 @@ dist/
 # NAPI-RS native binaries (platform-specific, built in CI)
 *.node
 
+# NAPI-RS generated platform packages (created during release)
+packages/node/npm/
+
 # Environment & secrets
 .env
 .env.*
