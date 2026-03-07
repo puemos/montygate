@@ -50,10 +50,7 @@ where
             Err(e) => {
                 let err_msg = e.to_string();
                 if is_retryable_error(&err_msg) && attempt + 1 < max_attempts {
-                    warn!(
-                        "Retryable error in '{}': {}",
-                        operation_name, err_msg
-                    );
+                    warn!("Retryable error in '{}': {}", operation_name, err_msg);
                     continue;
                 }
                 if attempt + 1 >= max_attempts {
@@ -76,8 +73,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     // === is_retryable_error ===
 
@@ -138,10 +135,8 @@ mod tests {
             base_delay_ms: 1,
         };
 
-        let result = retry_with_backoff(&config, "test", |_| async {
-            Ok::<_, MontygateError>(42)
-        })
-        .await;
+        let result =
+            retry_with_backoff(&config, "test", |_| async { Ok::<_, MontygateError>(42) }).await;
 
         assert_eq!(result.unwrap(), 42);
     }

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Montygate } from "../engine.js";
+import { unwrapExecutionResult } from "./utils.js";
 
 /**
  * Vercel AI SDK tool definition shape.
@@ -14,13 +15,15 @@ export interface VercelAIToolDef {
 /**
  * Convert a Montygate engine into Vercel AI SDK-compatible tool definitions.
  * Returns { execute, search } object for use with `generateText({ tools: ... })`.
+ *
+ * Note: Vercel AI requires Zod schemas (not JSON Schema), so the parameter
+ * shapes here must mirror the canonical schemas from the Rust core
+ * (`engine.getExecuteToolInputSchema()` / `engine.getSearchToolInputSchema()`).
  */
 export function toVercelAI(engine: Montygate): Record<string, VercelAIToolDef> {
-  const catalog = engine.getToolCatalog();
-
   return {
     execute: {
-      description: `Execute a Python script with access to these tools:\n${catalog}\nUse tool('name', key=value) to call tools. The last expression is returned.`,
+      description: engine.getExecuteToolDescription(),
       parameters: z.object({
         code: z.string().describe("Python script to execute"),
         inputs: z
@@ -33,11 +36,11 @@ export function toVercelAI(engine: Montygate): Record<string, VercelAIToolDef> {
           args.code as string,
           args.inputs as Record<string, unknown> | undefined,
         );
-        return result.output;
+        return unwrapExecutionResult(result);
       },
     },
     search: {
-      description: "Search for available tools by keyword",
+      description: engine.getSearchToolDescription(),
       parameters: z.object({
         query: z.string().describe("Search query"),
         top_k: z

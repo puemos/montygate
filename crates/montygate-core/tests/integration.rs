@@ -1,7 +1,7 @@
 use montygate_core::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 // =============================================================================
 // Registry integration tests
@@ -23,6 +23,7 @@ fn test_registry_register_search_catalog() {
                     },
                     "required": ["order_id"]
                 }),
+                output_schema: None,
             },
             ToolDefinition {
                 name: "create_ticket".to_string(),
@@ -35,6 +36,7 @@ fn test_registry_register_search_catalog() {
                     },
                     "required": ["subject", "body"]
                 }),
+                output_schema: None,
             },
             ToolDefinition {
                 name: "send_email".to_string(),
@@ -48,6 +50,7 @@ fn test_registry_register_search_catalog() {
                     },
                     "required": ["to", "subject", "body"]
                 }),
+                output_schema: None,
             },
         ])
         .unwrap();
@@ -218,11 +221,9 @@ async fn test_scheduler_policy_deny() {
     );
 
     let result = scheduler
-        .execute(
-            "dangerous_tool",
-            &serde_json::json!({}),
-            |_, _, _| async { Ok(serde_json::json!("should not reach")) },
-        )
+        .execute("dangerous_tool", &serde_json::json!({}), |_, _, _| async {
+            Ok(serde_json::json!("should not reach"))
+        })
         .await;
 
     assert!(matches!(
@@ -253,21 +254,17 @@ async fn test_scheduler_policy_rate_limit() {
 
     // First call succeeds
     let result = scheduler
-        .execute(
-            "limited_tool",
-            &serde_json::json!({}),
-            |_, _, _| async { Ok(serde_json::json!({"ok": true})) },
-        )
+        .execute("limited_tool", &serde_json::json!({}), |_, _, _| async {
+            Ok(serde_json::json!({"ok": true}))
+        })
         .await;
     assert!(result.is_ok());
 
     // Second call hits rate limit
     let result = scheduler
-        .execute(
-            "limited_tool",
-            &serde_json::json!({}),
-            |_, _, _| async { Ok(serde_json::json!({"ok": true})) },
-        )
+        .execute("limited_tool", &serde_json::json!({}), |_, _, _| async {
+            Ok(serde_json::json!({"ok": true}))
+        })
         .await;
     assert!(matches!(
         result.unwrap_err(),
@@ -302,9 +299,7 @@ async fn test_monty_engine_multi_tool_script() {
         }))
     });
 
-    dispatcher.register("send_email", |_args| {
-        Ok(serde_json::json!({"sent": true}))
-    });
+    dispatcher.register("send_email", |_args| Ok(serde_json::json!({"sent": true})));
 
     let input = RunProgramInput {
         code: r#"
@@ -318,10 +313,7 @@ ticket
         type_check: true,
     };
 
-    let result = engine
-        .execute(input, Arc::new(dispatcher))
-        .await
-        .unwrap();
+    let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
     // Verify the script executed all 3 tool calls
     assert_eq!(result.trace.len(), 3);
@@ -335,10 +327,12 @@ ticket
 
     // Verify tool call arguments were correctly passed
     assert_eq!(result.trace[0].arguments["order_id"], "123");
-    assert!(result.trace[1].arguments["subject"]
-        .as_str()
-        .unwrap()
-        .contains("Late order 123"));
+    assert!(
+        result.trace[1].arguments["subject"]
+            .as_str()
+            .unwrap()
+            .contains("Late order 123")
+    );
 }
 
 #[tokio::test]
@@ -360,10 +354,7 @@ async fn test_monty_engine_with_input_injection() {
         type_check: true,
     };
 
-    let result = engine
-        .execute(input, Arc::new(dispatcher))
-        .await
-        .unwrap();
+    let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
     assert_eq!(result.trace.len(), 1);
     assert_eq!(result.output["greeting"], "Hello, Alice!");
@@ -393,10 +384,7 @@ len(results)
         type_check: true,
     };
 
-    let result = engine
-        .execute(input, Arc::new(dispatcher))
-        .await
-        .unwrap();
+    let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
     // All 3 batch calls should be in the trace
     assert_eq!(result.trace.len(), 3);
@@ -495,10 +483,7 @@ ticket
         type_check: true,
     };
 
-    let result = engine
-        .execute(input, Arc::new(dispatcher))
-        .await
-        .unwrap();
+    let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
     // Only the final result (ticket) goes back to the LLM
     assert_eq!(result.output["ticket_id"], "TK-001");
@@ -611,6 +596,7 @@ async fn test_full_pipeline_registry_engine() {
                     },
                     "required": ["a", "b"]
                 }),
+                output_schema: None,
             },
             ToolDefinition {
                 name: "multiply".to_string(),
@@ -623,6 +609,7 @@ async fn test_full_pipeline_registry_engine() {
                     },
                     "required": ["a", "b"]
                 }),
+                output_schema: None,
             },
         ])
         .unwrap();
@@ -661,10 +648,7 @@ product
         type_check: true,
     };
 
-    let result = engine
-        .execute(input, Arc::new(dispatcher))
-        .await
-        .unwrap();
+    let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
     // 3 + 4 = 7, 7 * 5 = 35
     assert_eq!(result.output, serde_json::json!(35.0));
@@ -674,4 +658,102 @@ product
     let catalog = registry_for_dispatch.tool_catalog();
     assert!(catalog.contains("add("));
     assert!(catalog.contains("multiply("));
+}
+
+// =============================================================================
+// Centralized prompt & schema integration tests
+// =============================================================================
+
+#[test]
+fn test_system_prompt_is_consistent_across_registry_instances() {
+    let r1 = ToolRegistry::new();
+    let r2 = ToolRegistry::new();
+    r2.register_tool(ToolDefinition {
+        name: "some_tool".to_string(),
+        description: Some("A tool".to_string()),
+        input_schema: serde_json::json!({"type": "object"}),
+        output_schema: None,
+    })
+    .unwrap();
+
+    // System prompt is tool-independent — same regardless of registered tools
+    assert_eq!(r1.system_prompt(), r2.system_prompt());
+}
+
+#[test]
+fn test_input_schemas_are_valid_json_schema() {
+    let registry = ToolRegistry::new();
+
+    // Execute schema
+    let exec_schema = registry.execute_tool_input_schema();
+    assert_eq!(exec_schema["type"], "object");
+    let exec_props = exec_schema["properties"].as_object().unwrap();
+    assert_eq!(exec_props.len(), 2, "execute schema should have exactly 2 properties");
+    // Every property must have a type
+    for (key, prop) in exec_props {
+        assert!(
+            prop.get("type").is_some(),
+            "execute property '{}' is missing 'type'",
+            key
+        );
+    }
+
+    // Search schema
+    let search_schema = registry.search_tool_input_schema();
+    assert_eq!(search_schema["type"], "object");
+    let search_props = search_schema["properties"].as_object().unwrap();
+    assert_eq!(search_props.len(), 2, "search schema should have exactly 2 properties");
+    for (key, prop) in search_props {
+        assert!(
+            prop.get("type").is_some(),
+            "search property '{}' is missing 'type'",
+            key
+        );
+    }
+}
+
+#[test]
+fn test_execute_description_includes_registered_tools() {
+    let registry = ToolRegistry::new();
+    registry
+        .register_tools(vec![
+            ToolDefinition {
+                name: "alpha".to_string(),
+                description: Some("First tool".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "required": ["x"]
+                }),
+                output_schema: None,
+            },
+            ToolDefinition {
+                name: "beta".to_string(),
+                description: Some("Second tool".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"y": {"type": "number"}},
+                    "required": ["y"]
+                }),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {"result": {"type": "number"}}
+                })),
+            },
+        ])
+        .unwrap();
+
+    let desc = registry.execute_tool_description();
+
+    // Must contain both tools with their signatures
+    assert!(desc.contains("alpha(x: string)"), "Missing alpha signature");
+    assert!(desc.contains("beta(y: number)"), "Missing beta signature");
+    assert!(desc.contains("First tool"));
+    assert!(desc.contains("Second tool"));
+    // Output schema annotation for beta
+    assert!(desc.contains("->"));
+
+    // Must still contain instructions
+    assert!(desc.contains("FRESH sandbox"));
+    assert!(desc.contains("batch_tools"));
 }

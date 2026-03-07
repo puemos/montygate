@@ -85,4 +85,22 @@ describe("zodToJsonSchema", () => {
       additionalProperties: { type: "number" },
     });
   });
+
+  it("preserves field descriptions", () => {
+    const result = zodToJsonSchema(z.string().describe("hello world"));
+    expect(result).toEqual({
+      type: "string",
+      description: "hello world",
+    });
+  });
+
+  it("preserves optional wrapper descriptions", () => {
+    const schema = z.object({
+      note: z.string().optional().describe("Optional note"),
+    });
+
+    const result = zodToJsonSchema(schema);
+    const props = result.properties as Record<string, { description?: string }>;
+    expect(props.note.description).toBe("Optional note");
+  });
 });

@@ -17,8 +17,9 @@ interface NativeEngine {
   registerTool(
     definition: {
       name: string;
-      description: string | null;
+      description?: string;
       inputSchema: unknown;
+      outputSchema?: unknown;
     },
     run: (args: unknown) => Promise<unknown>,
   ): void;
@@ -28,6 +29,11 @@ interface NativeEngine {
   ): Promise<NativeExecutionResult>;
   search(query: string, topK?: number | null): NativeSearchResult[];
   getToolCatalog(): string;
+  getExecuteToolDescription(): string;
+  getSearchToolDescription(): string;
+  getSystemPrompt(): string;
+  getExecuteToolInputSchema(): Record<string, unknown>;
+  getSearchToolInputSchema(): Record<string, unknown>;
   toolCount(): number;
   getTraces(): NativeTraceEntry[];
   clearTraces(): void;
@@ -60,6 +66,7 @@ interface NativeSearchResult {
   name: string;
   description: string | null;
   inputSchema: unknown;
+  outputSchema?: unknown;
 }
 
 interface NativeEngineConstructor {
@@ -86,35 +93,29 @@ interface NativeEngineConstructor {
   }): NativeEngine;
 }
 
-// Try to load the native binding (platform-specific .node file)
+// Try to load the native binding (platform-specific .node file).
 let NativeEngineClass: NativeEngineConstructor;
 try {
+  const platform = process.platform;
+  const arch = process.arch;
+  const platformMap: Record<string, string> = {
+    darwin: "darwin",
+    linux: "linux",
+    win32: "win32",
+  };
+  const archMap: Record<string, string> = {
+    x64: "x64",
+    arm64: "arm64",
+  };
+  const p = platformMap[platform] ?? platform;
+  const a = archMap[arch] ?? arch;
+  const bindingPath = `../montygate.${p}-${a}.node`;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const binding = require("../montygate.node");
+  const binding = require(bindingPath);
   NativeEngineClass = binding.NativeEngine;
 } catch {
-  // Try platform-specific binary name: montygate.{platform}-{arch}.node
-  try {
-    const platform = process.platform;
-    const arch = process.arch;
-    const platformMap: Record<string, string> = {
-      darwin: "darwin",
-      linux: "linux",
-      win32: "win32",
-    };
-    const archMap: Record<string, string> = {
-      x64: "x64",
-      arm64: "arm64",
-    };
-    const p = platformMap[platform] ?? platform;
-    const a = archMap[arch] ?? arch;
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const binding = require(`../montygate.${p}-${a}.node`);
-    NativeEngineClass = binding.NativeEngine;
-  } catch {
-    // Native binding not available — will throw at construction time
-    NativeEngineClass = undefined as unknown as NativeEngineConstructor;
-  }
+  // Native binding not available — will throw at construction time.
+  NativeEngineClass = undefined as unknown as NativeEngineConstructor;
 }
 
 /**
@@ -189,11 +190,15 @@ export class Montygate {
    */
   tool<T extends z.ZodType>(name: string, options: ToolOptions<T>): this {
     const inputSchema = zodToJsonSchema(options.params);
+    const outputSchema = options.returns
+      ? zodToJsonSchema(options.returns)
+      : undefined;
 
     const handle: ToolHandle = {
       name,
       description: options.description,
       inputSchema,
+      outputSchema,
     };
     this.tools.set(name, handle);
 
@@ -202,6 +207,7 @@ export class Montygate {
         name,
         description: options.description,
         inputSchema,
+        outputSchema,
       },
       options.run as (args: unknown) => Promise<unknown>,
     );
@@ -236,6 +242,21 @@ export class Montygate {
     return this.native.getToolCatalog();
   }
 
+  /**
+   * Get the canonical "execute" tool description for LLM adapters.
+   * Includes the tool catalog, usage instructions, and examples.
+   */
+  getExecuteToolDescription(): string {
+    return this.native.getExecuteToolDescription();
+  }
+
+  /**
+   * Get the canonical "search" tool description for LLM adapters.
+   */
+  getSearchToolDescription(): string {
+    return this.native.getSearchToolDescription();
+  }
+
   /** Number of registered tools. */
   get toolCount(): number {
     return this.native.toolCount();
@@ -255,6 +276,30 @@ export class Montygate {
   clearTraces(): void {
     this.native.clearTraces();
   }
+
+  /**
+   * Get a system prompt that guides the LLM toward efficient single-script usage.
+   * Include this in your API call's system message for best results.
+   */
+  getSystemPrompt(): string {
+    return this.native.getSystemPrompt();
+  }
+
+  /**
+   * Get the canonical JSON Schema for the `execute` tool's input parameters.
+   * Use this in adapters instead of hard-coding the schema.
+   */
+  getExecuteToolInputSchema(): Record<string, unknown> {
+    return this.native.getExecuteToolInputSchema() as Record<string, unknown>;
+  }
+
+  /**
+   * Get the canonical JSON Schema for the `search` tool's input parameters.
+   * Use this in adapters instead of hard-coding the schema.
+   */
+  getSearchToolInputSchema(): Record<string, unknown> {
+    return this.native.getSearchToolInputSchema() as Record<string, unknown>;
+  }
 }
 
 function mapTraceEntry(entry: NativeTraceEntry): TraceEntry {
@@ -273,12 +318,22 @@ function mapSearchResult(result: NativeSearchResult): SearchResult {
     name: result.name,
     description: result.description ?? undefined,
     inputSchema: (result.inputSchema ?? {}) as Record<string, unknown>,
+    outputSchema: result.outputSchema
+      ? (result.outputSchema as Record<string, unknown>)
+      : undefined,
   };
 }
 
 function mapExecutionResult(raw: NativeExecutionResult): ExecutionResult {
+  // If the script returned null/None but printed something, surface stdout
+  // so the LLM gets feedback instead of a bare null.
+  let output = raw.output;
+  if (output == null && raw.stdout.length > 0) {
+    output = { result: null, stdout: raw.stdout };
+  }
+
   return {
-    output: raw.output,
+    output,
     stdout: raw.stdout,
     stderr: raw.stderr,
     trace: raw.trace.map(mapTraceEntry),

@@ -60,15 +60,16 @@ impl Scheduler {
         }
 
         // 2. Acquire semaphore (concurrency limit)
-        let _permit = self.semaphore.acquire().await.map_err(|_| {
-            MontygateError::Execution("Scheduler semaphore closed".to_string())
-        })?;
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| MontygateError::Execution("Scheduler semaphore closed".to_string()))?;
 
         debug!("Acquired semaphore permit for tool '{}'", tool_name);
 
         // 3. Execute with retry + timeout
-        let timeout_duration =
-            std::time::Duration::from_millis(self.execution_limits.timeout_ms);
+        let timeout_duration = std::time::Duration::from_millis(self.execution_limits.timeout_ms);
 
         let tool_name_owned = tool_name.to_string();
         let args_owned = args.clone();
@@ -187,7 +188,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{PolicyAction, PolicyConfig, PolicyDefaults, PolicyRule};
+    use crate::types::{PolicyAction, PolicyConfig, PolicyDefaults};
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     fn default_scheduler() -> Scheduler {
@@ -206,10 +207,14 @@ mod tests {
         let scheduler = default_scheduler();
 
         let result = scheduler
-            .execute("test_tool", &serde_json::json!({"x": 1}), |_name, args, _attempt| {
-                let args = args.clone();
-                async move { Ok(args) }
-            })
+            .execute(
+                "test_tool",
+                &serde_json::json!({"x": 1}),
+                |_name, args, _attempt| {
+                    let args = args.clone();
+                    async move { Ok(args) }
+                },
+            )
             .await
             .unwrap();
 

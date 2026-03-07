@@ -27,19 +27,24 @@ function zodDefToJsonSchema(schema: z.ZodType): Record<string, unknown> {
   if (!def) return { type: "object" };
 
   const typeName: string = def.typeName;
+  let result: Record<string, unknown>;
 
   switch (typeName) {
     case "ZodString":
-      return { type: "string" };
+      result = { type: "string" };
+      break;
     case "ZodNumber":
-      return { type: "number" };
+      result = { type: "number" };
+      break;
     case "ZodBoolean":
-      return { type: "boolean" };
+      result = { type: "boolean" };
+      break;
     case "ZodArray":
-      return {
+      result = {
         type: "array",
         items: zodDefToJsonSchema(def.type),
       };
+      break;
     case "ZodObject": {
       const shape = def.shape();
       const properties: Record<string, unknown> = {};
@@ -49,32 +54,50 @@ function zodDefToJsonSchema(schema: z.ZodType): Record<string, unknown> {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const fieldDef = (value as any)._def;
         if (fieldDef?.typeName === "ZodOptional") {
-          properties[key] = zodDefToJsonSchema(fieldDef.innerType);
+          properties[key] = withDescription(
+            zodDefToJsonSchema(fieldDef.innerType),
+            fieldDef.description,
+          );
         } else {
           properties[key] = zodDefToJsonSchema(value as z.ZodType);
           required.push(key);
         }
       }
 
-      const result: Record<string, unknown> = {
+      result = {
         type: "object",
         properties,
       };
       if (required.length > 0) {
         result.required = required;
       }
-      return result;
+      break;
     }
     case "ZodOptional":
-      return zodDefToJsonSchema(def.innerType);
+      result = zodDefToJsonSchema(def.innerType);
+      break;
     case "ZodEnum":
-      return { type: "string", enum: def.values };
+      result = { type: "string", enum: def.values };
+      break;
     case "ZodRecord":
-      return {
+      result = {
         type: "object",
         additionalProperties: zodDefToJsonSchema(def.valueType),
       };
+      break;
     default:
-      return {};
+      result = {};
   }
+
+  return withDescription(result, def.description);
+}
+
+function withDescription(
+  schema: Record<string, unknown>,
+  description?: string,
+): Record<string, unknown> {
+  if (description && schema.description == null) {
+    schema.description = description;
+  }
+  return schema;
 }

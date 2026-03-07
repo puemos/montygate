@@ -1,4 +1,5 @@
 import type { Montygate } from "../engine.js";
+import { unwrapExecutionResult } from "./utils.js";
 
 /** Anthropic tool format (for use with the Anthropic SDK). */
 export interface AnthropicTool {
@@ -16,44 +17,19 @@ export interface AnthropicTool {
  * Returns [execute, search] tools.
  */
 export function toAnthropic(engine: Montygate): AnthropicTool[] {
-  const catalog = engine.getToolCatalog();
+  const execSchema = engine.getExecuteToolInputSchema();
+  const searchSchema = engine.getSearchToolInputSchema();
 
   return [
     {
       name: "execute",
-      description: `Execute a Python script with access to these tools:\n${catalog}\nUse tool('name', key=value) to call tools. The last expression is returned.`,
-      input_schema: {
-        type: "object",
-        properties: {
-          code: {
-            type: "string",
-            description: "Python script to execute",
-          },
-          inputs: {
-            type: "object",
-            description: "Variables to inject into the script",
-          },
-        },
-        required: ["code"],
-      },
+      description: engine.getExecuteToolDescription(),
+      input_schema: execSchema as AnthropicTool["input_schema"],
     },
     {
       name: "search",
-      description: "Search for available tools by keyword",
-      input_schema: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "Search query",
-          },
-          top_k: {
-            type: "number",
-            description: "Maximum number of results",
-          },
-        },
-        required: ["query"],
-      },
+      description: engine.getSearchToolDescription(),
+      input_schema: searchSchema as AnthropicTool["input_schema"],
     },
   ];
 }
@@ -71,7 +47,7 @@ export async function handleAnthropicToolCall(
       input.code as string,
       input.inputs as Record<string, unknown> | undefined,
     );
-    return result.output;
+    return unwrapExecutionResult(result);
   } else if (name === "search") {
     return engine.search(
       input.query as string,

@@ -1,4 +1,5 @@
 import type { Montygate } from "../engine.js";
+import { unwrapExecutionResult } from "./utils.js";
 
 /** OpenAI function tool format. */
 export interface OpenAITool {
@@ -19,49 +20,24 @@ export interface OpenAITool {
  * Returns [execute, search] function tools.
  */
 export function toOpenAI(engine: Montygate): OpenAITool[] {
-  const catalog = engine.getToolCatalog();
+  const execSchema = engine.getExecuteToolInputSchema();
+  const searchSchema = engine.getSearchToolInputSchema();
 
   return [
     {
       type: "function",
       function: {
         name: "execute",
-        description: `Execute a Python script with access to these tools:\n${catalog}\nUse tool('name', key=value) to call tools. The last expression is returned.`,
-        parameters: {
-          type: "object",
-          properties: {
-            code: {
-              type: "string",
-              description: "Python script to execute",
-            },
-            inputs: {
-              type: "object",
-              description: "Variables to inject into the script",
-            },
-          },
-          required: ["code"],
-        },
+        description: engine.getExecuteToolDescription(),
+        parameters: execSchema as OpenAITool["function"]["parameters"],
       },
     },
     {
       type: "function",
       function: {
         name: "search",
-        description: "Search for available tools by keyword",
-        parameters: {
-          type: "object",
-          properties: {
-            query: {
-              type: "string",
-              description: "Search query",
-            },
-            top_k: {
-              type: "number",
-              description: "Maximum number of results",
-            },
-          },
-          required: ["query"],
-        },
+        description: engine.getSearchToolDescription(),
+        parameters: searchSchema as OpenAITool["function"]["parameters"],
       },
     },
   ];
@@ -82,7 +58,7 @@ export async function handleOpenAIToolCall(
       input.code as string,
       input.inputs as Record<string, unknown> | undefined,
     );
-    return JSON.stringify(result.output);
+    return JSON.stringify(unwrapExecutionResult(result));
   } else if (name === "search") {
     const results = engine.search(
       input.query as string,

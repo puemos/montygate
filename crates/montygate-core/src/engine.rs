@@ -1,5 +1,5 @@
-use crate::types::{ExecutionResult, ResourceLimits, Result, RunProgramInput, ToolCall};
 use crate::MontygateError;
+use crate::types::{ExecutionResult, ResourceLimits, Result, RunProgramInput, ToolCall};
 use monty::{
     CollectStringPrint, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject,
     MontyRun, RunProgress,
@@ -14,7 +14,8 @@ use tracing::{debug, info, warn};
 #[async_trait::async_trait]
 pub trait ToolDispatcher: Send + Sync + std::fmt::Debug {
     /// Dispatch a tool call to the appropriate handler
-    async fn dispatch(&self, tool_name: &str, args: serde_json::Value) -> Result<serde_json::Value>;
+    async fn dispatch(&self, tool_name: &str, args: serde_json::Value)
+    -> Result<serde_json::Value>;
 }
 
 /// Execution engine for running Monty programs
@@ -109,14 +110,12 @@ impl ExecutionEngine for MockEngine {
             match dispatcher.dispatch(&tool_name, args.clone()).await {
                 Ok(result) => {
                     let duration = call_start.elapsed().as_millis() as u64;
-                    let call = ToolCall::new(tool_name, args)
-                        .with_result(result, duration);
+                    let call = ToolCall::new(tool_name, args).with_result(result, duration);
                     trace.push(call);
                 }
                 Err(e) => {
                     let duration = call_start.elapsed().as_millis() as u64;
-                    let call = ToolCall::new(tool_name, args)
-                        .with_error(e.to_string(), duration);
+                    let call = ToolCall::new(tool_name, args).with_error(e.to_string(), duration);
                     trace.push(call);
                 }
             }
@@ -127,8 +126,7 @@ impl ExecutionEngine for MockEngine {
 
         info!(
             "Mock execution completed in {}ms with {} tool calls",
-            total_duration,
-            trace_len
+            total_duration, trace_len
         );
 
         Ok(ExecutionResult {
@@ -390,15 +388,14 @@ impl ExecutionEngine for MontyEngine {
                 ToolCallMessage::Batch(batch) => {
                     debug!("Dispatching batch of {} tool calls", batch.calls.len());
 
-                    let results = futures::future::join_all(
-                        batch.calls.iter().map(|(name, args)| {
+                    let results =
+                        futures::future::join_all(batch.calls.iter().map(|(name, args)| {
                             let d = dispatcher.clone();
                             let name = name.clone();
                             let args = args.clone();
                             async move { d.dispatch(&name, args).await }
-                        }),
-                    )
-                    .await;
+                        }))
+                        .await;
 
                     for (i, result) in results.iter().enumerate() {
                         let (name, args) = &batch.calls[i];
@@ -686,9 +683,7 @@ fn run_monty_blocking(
                             )),
                             Err(_) => ExternalResult::Error(MontyException::new(
                                 ExcType::RuntimeError,
-                                Some(
-                                    "Tool call cancelled: response channel closed".to_string(),
-                                ),
+                                Some("Tool call cancelled: response channel closed".to_string()),
                             )),
                         }
                     }
@@ -866,13 +861,17 @@ fn format_exception(e: &MontyException) -> String {
 /// Simple async tool dispatcher for testing
 #[derive(Default)]
 pub struct SimpleDispatcher {
-    callbacks: HashMap<String, Box<dyn Fn(serde_json::Value) -> Result<serde_json::Value> + Send + Sync>>,
+    callbacks:
+        HashMap<String, Box<dyn Fn(serde_json::Value) -> Result<serde_json::Value> + Send + Sync>>,
 }
 
 impl std::fmt::Debug for SimpleDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SimpleDispatcher")
-            .field("registered_tools", &self.callbacks.keys().collect::<Vec<_>>())
+            .field(
+                "registered_tools",
+                &self.callbacks.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -886,13 +885,18 @@ impl SimpleDispatcher {
     where
         F: Fn(serde_json::Value) -> Result<serde_json::Value> + Send + Sync + 'static,
     {
-        self.callbacks.insert(tool_name.to_string(), Box::new(callback));
+        self.callbacks
+            .insert(tool_name.to_string(), Box::new(callback));
     }
 }
 
 #[async_trait::async_trait]
 impl ToolDispatcher for SimpleDispatcher {
-    async fn dispatch(&self, tool_name: &str, args: serde_json::Value) -> Result<serde_json::Value> {
+    async fn dispatch(
+        &self,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         if let Some(callback) = self.callbacks.get(tool_name) {
             callback(args)
         } else {
@@ -980,10 +984,7 @@ mod tests {
             type_check: true,
         };
 
-        let result = engine
-            .execute(input, Arc::new(dispatcher))
-            .await
-            .unwrap();
+        let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
         assert_eq!(result.trace.len(), 1);
         assert_eq!(result.trace[0].tool, "test.echo");
@@ -1012,12 +1013,8 @@ mod tests {
         let engine = MockEngine::default();
         let mut dispatcher = SimpleDispatcher::new();
 
-        dispatcher.register("create_issue", |_args| {
-            Ok(serde_json::json!({"id": 123}))
-        });
-        dispatcher.register("post_message", |_args| {
-            Ok(serde_json::json!({"ok": true}))
-        });
+        dispatcher.register("create_issue", |_args| Ok(serde_json::json!({"id": 123})));
+        dispatcher.register("post_message", |_args| Ok(serde_json::json!({"ok": true})));
 
         let input = RunProgramInput {
             code: r#"
@@ -1029,10 +1026,7 @@ mod tests {
             type_check: true,
         };
 
-        let result = engine
-            .execute(input, Arc::new(dispatcher))
-            .await
-            .unwrap();
+        let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
         assert_eq!(result.trace.len(), 2);
         assert_eq!(result.trace[0].tool, "create_issue");
@@ -1148,9 +1142,7 @@ mod tests {
     #[tokio::test]
     async fn test_simple_dispatcher_tool_not_found() {
         let dispatcher = SimpleDispatcher::new();
-        let result = dispatcher
-            .dispatch("missing", serde_json::json!({}))
-            .await;
+        let result = dispatcher.dispatch("missing", serde_json::json!({})).await;
         assert!(matches!(
             result.unwrap_err(),
             MontygateError::ToolNotFound(_)
@@ -1209,10 +1201,7 @@ mod tests {
             type_check: true,
         };
 
-        let result = engine
-            .execute(input, Arc::new(dispatcher))
-            .await
-            .unwrap();
+        let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
         assert_eq!(result.stdout.trim(), "30");
     }
@@ -1232,10 +1221,7 @@ mod tests {
             type_check: true,
         };
 
-        let result = engine
-            .execute(input, Arc::new(dispatcher))
-            .await
-            .unwrap();
+        let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
         assert_eq!(result.trace.len(), 1);
         assert_eq!(result.trace[0].arguments["message"], "hello");
@@ -1260,10 +1246,7 @@ print(len(results))
             type_check: true,
         };
 
-        let result = engine
-            .execute(input, Arc::new(dispatcher))
-            .await
-            .unwrap();
+        let result = engine.execute(input, Arc::new(dispatcher)).await.unwrap();
 
         assert_eq!(result.stdout.trim(), "2");
         assert_eq!(result.trace.len(), 2);

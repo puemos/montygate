@@ -178,6 +178,26 @@ result
     expect(result.trace[1].output).toBeDefined();
   });
 
+  it("print()-only script returns stdout hint instead of bare null", async () => {
+    const gate = new Montygate();
+
+    gate.tool("ping", {
+      description: "Ping",
+      params: z.object({}),
+      run: async () => "pong",
+    });
+
+    const result = await gate.execute(`
+result = tool('ping')
+print(result)
+    `);
+
+    // Should surface stdout so the LLM gets feedback
+    const output = result.output as { result: null; stdout: string };
+    expect(output.result).toBeNull();
+    expect(output.stdout).toContain("pong");
+  });
+
   it("script syntax error returns error in output", async () => {
     const gate = new Montygate();
 
@@ -186,6 +206,21 @@ result
     expect(output.status).toBe("error");
     expect(output.error).toContain("SyntaxError");
     expect(result.stderr).toContain("SyntaxError");
+  });
+
+  it("unknown tool error suggests similar tool names", async () => {
+    const gate = new Montygate();
+
+    gate.tool("create_ticket", {
+      params: z.object({ subject: z.string() }),
+      run: async ({ subject }) => ({ subject }),
+    });
+
+    const result = await gate.execute(`tool('create_tiket', subject='Bug')`);
+    const output = result.output as { status: string; error: string };
+    expect(output.status).toBe("error");
+    expect(output.error).toContain("Did you mean");
+    expect(output.error).toContain("create_ticket");
   });
 });
 
@@ -231,6 +266,7 @@ describe("e2e: search and catalog", () => {
     gate.tool("create_invoice", {
       description: "Create a new invoice for billing",
       params: z.object({ amount: z.number() }),
+      returns: z.object({ invoice_id: z.string(), status: z.string() }),
       run: async () => ({}),
     });
 
@@ -257,6 +293,12 @@ describe("e2e: search and catalog", () => {
     const notifResults = gate.search("notification");
     expect(notifResults.length).toBeGreaterThanOrEqual(1);
     expect(notifResults[0].name).toBe("send_notification");
+
+    // Search by output field name and preserve output schema
+    const invoiceResults = gate.search("invoice_id");
+    expect(invoiceResults.length).toBeGreaterThanOrEqual(1);
+    expect(invoiceResults[0].name).toBe("create_invoice");
+    expect(invoiceResults[0].outputSchema).toBeDefined();
   });
 
   it("tool catalog includes all registered tools with schemas", async () => {
@@ -268,9 +310,23 @@ describe("e2e: search and catalog", () => {
       run: async ({ a, b }) => a + b,
     });
 
+    gate.tool("create_ticket", {
+      description: "Create a customer support ticket",
+      params: z.object({
+        subject: z.string().describe("Ticket subject line"),
+        priority: z
+          .enum(["low", "medium", "high"])
+          .describe("Ticket priority"),
+      }),
+      returns: z.object({ ticket_id: z.string() }),
+      run: async () => ({ ticket_id: "TKT-1" }),
+    });
+
     const catalog = gate.getToolCatalog();
     expect(catalog).toContain("add_numbers");
     expect(catalog).toContain("Add two numbers");
+    expect(catalog).toContain('priority: string ("low"|"medium"|"high")');
+    expect(catalog).toContain("subject: string (Ticket subject line)");
   });
 });
 
@@ -393,6 +449,84 @@ describe("e2e: adapter round-trip with real engine", () => {
     const results = searchResult as Array<{ name: string }>;
     expect(results.length).toBeGreaterThanOrEqual(1);
     expect(results[0].name).toBe("get_weather");
+  });
+});
+
+describe("e2e: prompt guidance", () => {
+  it("system prompt includes good and bad execute examples", () => {
+    const gate = new Montygate();
+    const prompt = gate.getSystemPrompt();
+    expect(prompt).toContain("GOOD:");
+    expect(prompt).toContain("BAD:");
+    expect(prompt).toContain("NameError");
+  });
+
+  it("system prompt mentions fresh sandbox and single script", () => {
+    const gate = new Montygate();
+    const prompt = gate.getSystemPrompt();
+    expect(prompt).toContain("FRESH sandbox");
+    expect(prompt).toContain("SINGLE script");
+    expect(prompt).toContain("batch_tools()");
+    expect(prompt).toContain("LAST EXPRESSION");
+  });
+
+  it("system prompt is identical across instances", () => {
+    const gate1 = new Montygate();
+    const gate2 = new Montygate();
+    gate2.tool("some_tool", {
+      params: z.object({ x: z.string() }),
+      run: async () => "ok",
+    });
+    // System prompt should not change based on registered tools
+    expect(gate1.getSystemPrompt()).toBe(gate2.getSystemPrompt());
+  });
+});
+
+describe("e2e: centralized schemas", () => {
+  it("getExecuteToolInputSchema returns valid JSON Schema", () => {
+    const gate = new Montygate();
+    const schema = gate.getExecuteToolInputSchema();
+
+    expect(schema.type).toBe("object");
+    expect(schema.properties).toBeDefined();
+    const props = schema.properties as Record<string, Record<string, unknown>>;
+    expect(props.code.type).toBe("string");
+    expect(props.inputs.type).toBe("object");
+    expect(schema.required).toEqual(["code"]);
+  });
+
+  it("getSearchToolInputSchema returns valid JSON Schema", () => {
+    const gate = new Montygate();
+    const schema = gate.getSearchToolInputSchema();
+
+    expect(schema.type).toBe("object");
+    expect(schema.properties).toBeDefined();
+    const props = schema.properties as Record<string, Record<string, unknown>>;
+    expect(props.query.type).toBe("string");
+    expect(props.top_k.type).toBe("number");
+    expect(schema.required).toEqual(["query"]);
+  });
+
+  it("adapter schemas match the centralized execute schema", () => {
+    const gate = new Montygate();
+    const centralSchema = gate.getExecuteToolInputSchema();
+    const anthropicTools = toAnthropic(gate);
+    const openaiTools = toOpenAI(gate);
+
+    // Anthropic input_schema should be the same object structure
+    expect(anthropicTools[0].input_schema).toEqual(centralSchema);
+    // OpenAI parameters should be the same object structure
+    expect(openaiTools[0].function.parameters).toEqual(centralSchema);
+  });
+
+  it("adapter schemas match the centralized search schema", () => {
+    const gate = new Montygate();
+    const centralSchema = gate.getSearchToolInputSchema();
+    const anthropicTools = toAnthropic(gate);
+    const openaiTools = toOpenAI(gate);
+
+    expect(anthropicTools[1].input_schema).toEqual(centralSchema);
+    expect(openaiTools[1].function.parameters).toEqual(centralSchema);
   });
 });
 

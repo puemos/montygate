@@ -209,6 +209,8 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Retry configuration for tool calls
@@ -353,11 +355,8 @@ mod tests {
 
     #[test]
     fn test_tool_call_with_result() {
-        let call = ToolCall::new(
-            "create_issue".to_string(),
-            serde_json::json!({}),
-        )
-        .with_result(serde_json::json!({"id": 123}), 42);
+        let call = ToolCall::new("create_issue".to_string(), serde_json::json!({}))
+            .with_result(serde_json::json!({"id": 123}), 42);
 
         assert_eq!(call.result, Some(serde_json::json!({"id": 123})));
         assert_eq!(call.duration_ms, 42);
@@ -366,11 +365,8 @@ mod tests {
 
     #[test]
     fn test_tool_call_with_error() {
-        let call = ToolCall::new(
-            "create_issue".to_string(),
-            serde_json::json!({}),
-        )
-        .with_error("connection timeout".to_string(), 5000);
+        let call = ToolCall::new("create_issue".to_string(), serde_json::json!({}))
+            .with_error("connection timeout".to_string(), 5000);
 
         assert!(call.result.is_none());
         assert_eq!(call.error, Some("connection timeout".to_string()));
@@ -379,8 +375,7 @@ mod tests {
 
     #[test]
     fn test_tool_call_with_retries() {
-        let call = ToolCall::new("test".to_string(), serde_json::json!({}))
-            .with_retries(3);
+        let call = ToolCall::new("test".to_string(), serde_json::json!({})).with_retries(3);
         assert_eq!(call.retries, 3);
     }
 
@@ -425,12 +420,8 @@ mod tests {
 
     #[test]
     fn test_execution_result_with_trace() {
-        let call = ToolCall::new(
-            "echo".to_string(),
-            serde_json::json!({}),
-        );
-        let result =
-            ExecutionResult::success(serde_json::json!("ok")).with_trace(vec![call]);
+        let call = ToolCall::new("echo".to_string(), serde_json::json!({}));
+        let result = ExecutionResult::success(serde_json::json!("ok")).with_trace(vec![call]);
 
         assert_eq!(result.trace.len(), 1);
         assert_eq!(result.trace[0].tool, "echo");
@@ -445,8 +436,7 @@ mod tests {
             memory_peak_bytes: 1024,
             steps_executed: 10,
         };
-        let result =
-            ExecutionResult::success(serde_json::json!("ok")).with_stats(stats);
+        let result = ExecutionResult::success(serde_json::json!("ok")).with_stats(stats);
 
         assert_eq!(result.stats.total_duration_ms, 100);
         assert_eq!(result.stats.external_calls, 2);
@@ -765,6 +755,7 @@ mod tests {
             name: "create_issue".to_string(),
             description: Some("Create a GitHub issue".to_string()),
             input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
         };
         let json = serde_json::to_string(&def).unwrap();
         let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
@@ -781,6 +772,7 @@ mod tests {
             name: "test".to_string(),
             description: None,
             input_schema: serde_json::json!({}),
+            output_schema: None,
         };
         let json = serde_json::to_string(&def).unwrap();
         let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();

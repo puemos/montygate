@@ -41,6 +41,8 @@ export interface PolicyRule {
 export interface ToolOptions<T extends z.ZodType = z.ZodType> {
   description?: string;
   params: T;
+  /** Zod schema describing the tool's return type (shown in catalog so the LLM knows field names). */
+  returns?: z.ZodType;
   run: (input: z.infer<T>) => Promise<unknown>;
 }
 
@@ -49,6 +51,7 @@ export interface ToolHandle {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
 }
 
 /** Result of executing a script. */
@@ -82,4 +85,5 @@ export interface SearchResult {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
 }

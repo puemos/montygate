@@ -28,16 +28,13 @@ type ToolTsfn = Arc<RawToolTsfn>;
 /// Dispatcher that calls back into JS via ThreadsafeFunction when a tool is invoked.
 struct NapiDispatcher {
     run_functions: Arc<DashMap<String, ToolTsfn>>,
+    registry: ToolRegistry,
     scheduler: Arc<Scheduler>,
 }
 
 impl std::fmt::Debug for NapiDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tools: Vec<String> = self
-            .run_functions
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
+        let tools: Vec<String> = self.run_functions.iter().map(|e| e.key().clone()).collect();
         f.debug_struct("NapiDispatcher")
             .field("tools", &tools)
             .finish()
@@ -51,10 +48,18 @@ impl ToolDispatcher for NapiDispatcher {
         tool_name: &str,
         args: serde_json::Value,
     ) -> montygate_core::Result<serde_json::Value> {
-        let tsfn = self
-            .run_functions
-            .get(tool_name)
-            .ok_or_else(|| montygate_core::MontygateError::ToolNotFound(tool_name.to_string()))?;
+        let tsfn = self.run_functions.get(tool_name).ok_or_else(|| {
+            let suggestions = self.registry.suggest_tools(tool_name, 3);
+            if suggestions.is_empty() {
+                montygate_core::MontygateError::ToolNotFound(tool_name.to_string())
+            } else {
+                montygate_core::MontygateError::ToolNotFound(format!(
+                    "{}. Did you mean: {}?",
+                    tool_name,
+                    suggestions.join(", ")
+                ))
+            }
+        })?;
 
         let tsfn = tsfn.value().clone();
         let tool_name_owned = tool_name.to_string();
@@ -152,9 +157,7 @@ impl NativeEngine {
     ///
     /// The callback receives a JSON value (the tool arguments) and must return
     /// a Promise that resolves to a JSON value (the tool result).
-    #[napi(
-        ts_args_type = "definition: NapiToolDefinition, run: (args: any) => Promise<any>"
-    )]
+    #[napi(ts_args_type = "definition: NapiToolDefinition, run: (args: any) => Promise<any>")]
     pub fn register_tool(
         &self,
         definition: NapiToolDefinition,
@@ -199,6 +202,7 @@ impl NativeEngine {
 
         let dispatcher = Arc::new(NapiDispatcher {
             run_functions: self.run_functions.clone(),
+            registry: self.registry.clone(),
             scheduler: self.scheduler.clone(),
         });
 
@@ -251,6 +255,36 @@ impl NativeEngine {
     #[napi]
     pub fn get_tool_catalog(&self) -> String {
         self.registry.tool_catalog()
+    }
+
+    /// Get the canonical "execute" tool description for LLM adapters.
+    #[napi]
+    pub fn get_execute_tool_description(&self) -> String {
+        self.registry.execute_tool_description()
+    }
+
+    /// Get the canonical "search" tool description for LLM adapters.
+    #[napi]
+    pub fn get_search_tool_description(&self) -> String {
+        self.registry.search_tool_description()
+    }
+
+    /// Get the canonical system prompt for guiding LLMs.
+    #[napi]
+    pub fn get_system_prompt(&self) -> String {
+        self.registry.system_prompt()
+    }
+
+    /// Get the canonical JSON Schema for the execute tool's input parameters.
+    #[napi]
+    pub fn get_execute_tool_input_schema(&self) -> serde_json::Value {
+        self.registry.execute_tool_input_schema()
+    }
+
+    /// Get the canonical JSON Schema for the search tool's input parameters.
+    #[napi]
+    pub fn get_search_tool_input_schema(&self) -> serde_json::Value {
+        self.registry.search_tool_input_schema()
     }
 
     /// Get the number of registered tools.

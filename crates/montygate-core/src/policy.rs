@@ -1,5 +1,5 @@
-use crate::types::{PolicyAction, PolicyConfig, Result};
 use crate::MontygateError;
+use crate::types::{PolicyAction, PolicyConfig, Result};
 use dashmap::DashMap;
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
@@ -50,11 +50,7 @@ impl PolicyEngine {
     }
 
     /// Check if a tool call is allowed by name
-    pub async fn check(
-        &self,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> Result<PolicyDecision> {
+    pub async fn check(&self, tool_name: &str, args: &serde_json::Value) -> Result<PolicyDecision> {
         debug!("Checking policy for tool '{}'", tool_name);
 
         // Check rules in order (more specific rules should come first)
@@ -76,11 +72,17 @@ impl PolicyEngine {
                             }
                         }
 
-                        info!("Tool '{}' allowed by rule '{}'", tool_name, rule.match_pattern);
+                        info!(
+                            "Tool '{}' allowed by rule '{}'",
+                            tool_name, rule.match_pattern
+                        );
                         return Ok(PolicyDecision::Allow);
                     }
                     PolicyAction::Deny => {
-                        warn!("Tool '{}' denied by rule '{}'", tool_name, rule.match_pattern);
+                        warn!(
+                            "Tool '{}' denied by rule '{}'",
+                            tool_name, rule.match_pattern
+                        );
                         return Ok(PolicyDecision::Deny {
                             reason: format!("Tool '{}' is not allowed", tool_name),
                         });
@@ -173,9 +175,17 @@ impl Default for PolicyEngine {
 #[derive(Debug, Clone)]
 pub enum PolicyDecision {
     Allow,
-    Deny { reason: String },
-    RequireApproval { tool: String, args: serde_json::Value },
-    RateLimitExceeded { tool: String, limit: String },
+    Deny {
+        reason: String,
+    },
+    RequireApproval {
+        tool: String,
+        args: serde_json::Value,
+    },
+    RateLimitExceeded {
+        tool: String,
+        limit: String,
+    },
 }
 
 impl PolicyDecision {
@@ -222,9 +232,9 @@ fn parse_rate_limit(limit_str: &str) -> Result<RateLimiter<NotKeyed, InMemorySta
         )));
     }
 
-    let count: u32 = parts[0]
-        .parse()
-        .map_err(|_| MontygateError::Configuration(format!("Invalid rate limit count: {}", parts[0])))?;
+    let count: u32 = parts[0].parse().map_err(|_| {
+        MontygateError::Configuration(format!("Invalid rate limit count: {}", parts[0]))
+    })?;
 
     let duration = match parts[1] {
         "sec" | "second" | "s" => Duration::from_secs(1),
@@ -235,7 +245,7 @@ fn parse_rate_limit(limit_str: &str) -> Result<RateLimiter<NotKeyed, InMemorySta
             return Err(MontygateError::Configuration(format!(
                 "Invalid rate limit duration: {}",
                 parts[1]
-            )))
+            )));
         }
     };
 
@@ -315,7 +325,10 @@ mod tests {
     #[tokio::test]
     async fn test_allow_policy() {
         let engine = PolicyEngine::new(create_test_policy_config());
-        let decision = engine.check("create_issue", &serde_json::json!({})).await.unwrap();
+        let decision = engine
+            .check("create_issue", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(decision.is_allowed());
     }
 
@@ -332,7 +345,10 @@ mod tests {
             }],
         };
         let engine = PolicyEngine::new(config);
-        let decision = engine.check("delete_repo", &serde_json::json!({})).await.unwrap();
+        let decision = engine
+            .check("delete_repo", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(decision.is_denied());
     }
 
@@ -355,7 +371,10 @@ mod tests {
             rules: vec![],
         };
         let engine = PolicyEngine::new(config);
-        let decision = engine.check("any_tool", &serde_json::json!({})).await.unwrap();
+        let decision = engine
+            .check("any_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(decision.is_allowed());
     }
 
@@ -368,7 +387,10 @@ mod tests {
             rules: vec![],
         };
         let engine = PolicyEngine::new(config);
-        let decision = engine.check("any_tool", &serde_json::json!({})).await.unwrap();
+        let decision = engine
+            .check("any_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(decision.is_denied());
     }
 
@@ -381,7 +403,10 @@ mod tests {
             rules: vec![],
         };
         let engine = PolicyEngine::new(config);
-        let decision = engine.check("any_tool", &serde_json::json!({})).await.unwrap();
+        let decision = engine
+            .check("any_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(decision.requires_approval());
     }
 
@@ -399,9 +424,15 @@ mod tests {
         };
         let engine = PolicyEngine::new(config);
 
-        let d1 = engine.check("test_tool", &serde_json::json!({})).await.unwrap();
+        let d1 = engine
+            .check("test_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(d1.is_allowed());
-        let d2 = engine.check("test_tool", &serde_json::json!({})).await.unwrap();
+        let d2 = engine
+            .check("test_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(d2.is_allowed());
     }
 
@@ -419,10 +450,16 @@ mod tests {
         };
         let engine = PolicyEngine::new(config);
 
-        let d1 = engine.check("test_limited", &serde_json::json!({})).await.unwrap();
+        let d1 = engine
+            .check("test_limited", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(d1.is_allowed());
 
-        let d2 = engine.check("test_limited", &serde_json::json!({})).await.unwrap();
+        let d2 = engine
+            .check("test_limited", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(matches!(d2, PolicyDecision::RateLimitExceeded { .. }));
     }
 
@@ -503,7 +540,10 @@ mod tests {
         };
         engine.update_config(new_config);
 
-        let d = engine.check("test_tool", &serde_json::json!({})).await.unwrap();
+        let d = engine
+            .check("test_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(d.is_allowed());
     }
 
@@ -611,7 +651,10 @@ mod tests {
             }],
         };
         let engine = PolicyEngine::new(config);
-        let decision = engine.check("blocked_tool", &serde_json::json!({})).await.unwrap();
+        let decision = engine
+            .check("blocked_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
         match decision {
             PolicyDecision::Deny { reason } => {
                 assert!(reason.contains("blocked_tool"));

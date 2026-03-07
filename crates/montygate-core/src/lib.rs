@@ -14,7 +14,9 @@ pub mod scheduler;
 pub mod types;
 
 // Re-export commonly used types
-pub use engine::{EngineManager, ExecutionEngine, MockEngine, MontyEngine, SimpleDispatcher, ToolDispatcher};
+pub use engine::{
+    EngineManager, ExecutionEngine, MockEngine, MontyEngine, SimpleDispatcher, ToolDispatcher,
+};
 pub use observability::{ExecutionTracer, TraceEntry};
 pub use policy::{PolicyDecision, PolicyEngine};
 pub use registry::ToolRegistry;

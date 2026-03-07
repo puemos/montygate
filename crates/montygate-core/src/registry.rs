@@ -1,5 +1,5 @@
-use crate::types::{Result, ToolDefinition};
 use crate::MontygateError;
+use crate::types::{Result, ToolDefinition};
 use dashmap::DashMap;
 use regex::Regex;
 use std::sync::Arc;
@@ -58,10 +58,7 @@ impl ToolRegistry {
 
     /// Get all registered tool names
     pub fn list_tools(&self) -> Vec<String> {
-        self.tools
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect()
+        self.tools.iter().map(|entry| entry.key().clone()).collect()
     }
 
     /// Get all tool definitions
@@ -72,7 +69,7 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Search tools by query string (substring match on name and description)
+    /// Search tools by query string using tool names, descriptions, and schemas.
     pub fn search_tools(&self, query: &str, top_k: usize) -> Vec<ToolDefinition> {
         let query_lower = query.to_lowercase();
         let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
@@ -100,6 +97,32 @@ impl ToolRegistry {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(top_k);
         scored.into_iter().map(|(def, _)| def).collect()
+    }
+
+    /// Suggest likely tool names for misspelled lookups.
+    pub fn suggest_tools(&self, query: &str, top_k: usize) -> Vec<String> {
+        let normalized_query = normalize_identifier(query);
+        if normalized_query.is_empty() {
+            return Vec::new();
+        }
+
+        let mut scored: Vec<(String, f64)> = self
+            .tools
+            .iter()
+            .filter_map(|entry| {
+                let name = entry.key().clone();
+                let score = compute_suggestion_score(&normalized_query, &name);
+                (score >= 0.55).then_some((name, score))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.truncate(top_k);
+        scored.into_iter().map(|(name, _)| name).collect()
     }
 
     /// Build a tool catalog string for inclusion in execute tool description
@@ -130,17 +153,7 @@ impl ToolRegistry {
 
                 let params: Vec<String> = props
                     .iter()
-                    .map(|(name, schema)| {
-                        let type_str = schema
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("any");
-                        if required.contains(name) {
-                            format!("{}: {}", name, type_str)
-                        } else {
-                            format!("{}?: {}", name, type_str)
-                        }
-                    })
+                    .map(|(name, schema)| format_parameter(name, schema, required.contains(name)))
                     .collect();
                 catalog.push_str(&params.join(", "));
             }
@@ -148,9 +161,100 @@ impl ToolRegistry {
             if let Some(desc) = &tool.description {
                 catalog.push_str(&format!(" - {}", desc));
             }
+            if let Some(output_schema) = &tool.output_schema {
+                catalog.push_str(&format!(" -> {}", format_output_schema(output_schema)));
+            }
             catalog.push('\n');
         }
         catalog
+    }
+
+    /// Build the canonical description for the "execute" tool exposed to LLMs.
+    /// This ensures all SDKs (Node, Python, etc.) present the same instructions.
+    pub fn execute_tool_description(&self) -> String {
+        let catalog = self.tool_catalog();
+        format!(
+            "Execute a Python script with access to these tools:\n\
+             {catalog}\n\
+             IMPORTANT: Each execute() runs in a FRESH sandbox — variables do NOT persist between calls.\n\
+             Do ALL related work (lookups, transformations, actions) in a SINGLE script.\n\
+             \n\
+             Call tools with: tool('name', key=value)\n\
+             The LAST EXPRESSION is the return value. Do NOT use print() — it returns None.\n\
+             \n\
+             Parallel dispatch: use batch_tools() only when calls are INDEPENDENT (no data flow between them).\n\
+             results = batch_tools([('tool_a', {{'x': 1}}), ('tool_b', {{'y': 2}})])\n\
+             Do NOT use batch_tools() when tool B needs output from tool A — use sequential tool() calls instead.\n\
+             \n\
+             Runtime restrictions:\n\
+             - No standard library (no json, re, math, datetime, collections, itertools, etc.) — use builtins and plain dicts/lists\n\
+             - No class definitions\n\
+             - sorted() and .sort() do not support key= or reverse= — sort flat lists only\n\
+             - No chained subscript assignment (x[a][b] = val) — use: inner = x[a]; inner[b] = val; x[a] = inner\n\
+             \n\
+             Example — all work in ONE script (variables are lost between calls):\n\
+             order = tool('lookup_order', order_id='123')\n\
+             ticket = tool('create_ticket', subject='Issue ' + order['id'])\n\
+             {{'order': order, 'ticket': ticket}}"
+        )
+    }
+
+    /// Build the canonical description for the "search" tool exposed to LLMs.
+    pub fn search_tool_description(&self) -> String {
+        "Search for available tools by keyword".to_string()
+    }
+
+    /// Return the canonical system prompt that guides LLMs toward efficient
+    /// single-script usage.  All SDKs (Node, Python, …) should use this so the
+    /// instructions stay in sync.
+    pub fn system_prompt(&self) -> String {
+        "You have access to an `execute` tool that runs a Python script in a sandboxed environment.\n\
+         CRITICAL: Each execute() call runs in a FRESH sandbox. Variables do NOT persist between calls.\n\
+         Always do ALL related work — lookups, transformations, and actions — in a SINGLE script.\n\
+         Use `batch_tools()` only for INDEPENDENT calls that do not rely on each other's outputs.\n\
+         The LAST EXPRESSION in the script is the return value. Do NOT use print().\n\
+         When a tool returns a dict, check the tool catalog for exact field names (e.g. `ticket_id` not `id`).\n\
+         GOOD: order = tool('lookup_order', order_id='123'); ticket = tool('create_ticket', subject='Late ' + order['id']); {'order': order, 'ticket': ticket}\n\
+         BAD: first call execute() with order = tool(...), then later call execute() with ticket = tool(... order['id'] ...).\n\
+         The BAD pattern fails with NameError because the second execute() cannot see variables from the first."
+            .to_string()
+    }
+
+    /// Return the canonical JSON Schema for the `execute` tool's input parameters.
+    /// All SDK adapters should use this instead of hard-coding the schema.
+    pub fn execute_tool_input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python script to execute"
+                },
+                "inputs": {
+                    "type": "object",
+                    "description": "Variables to inject into the script"
+                }
+            },
+            "required": ["code"]
+        })
+    }
+
+    /// Return the canonical JSON Schema for the `search` tool's input parameters.
+    pub fn search_tool_input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query"
+                },
+                "top_k": {
+                    "type": "number",
+                    "description": "Maximum number of results"
+                }
+            },
+            "required": ["query"]
+        })
     }
 
     /// Unregister a tool
@@ -175,11 +279,186 @@ impl Default for ToolRegistry {
     }
 }
 
-fn build_search_text(def: &ToolDefinition) -> String {
-    match &def.description {
-        Some(desc) => format!("{}: {}", def.name, desc),
-        None => def.name.clone(),
+fn format_parameter(name: &str, schema: &serde_json::Value, required: bool) -> String {
+    let mut rendered = if required {
+        format!("{}: {}", name, format_schema_type(schema))
+    } else {
+        format!("{}?: {}", name, format_schema_type(schema))
+    };
+
+    if let Some(annotation) = format_schema_annotation(schema) {
+        rendered.push_str(&format!(" ({annotation})"));
     }
+
+    rendered
+}
+
+/// Format a JSON Schema output_schema as a compact `{key: type, ...}` string for the catalog.
+fn format_output_schema(schema: &serde_json::Value) -> String {
+    format_schema_type(schema)
+}
+
+fn format_schema_type(schema: &serde_json::Value) -> String {
+    match schema.get("type").and_then(|t| t.as_str()) {
+        Some("array") => {
+            if let Some(items) = schema.get("items") {
+                format!("array<{}>", format_schema_type(items))
+            } else {
+                "array".to_string()
+            }
+        }
+        Some("object") => {
+            if let Some(props) = schema
+                .as_object()
+                .and_then(|o| o.get("properties"))
+                .and_then(|p| p.as_object())
+            {
+                let fields: Vec<String> = props
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, format_schema_type(v)))
+                    .collect();
+                format!("{{{}}}", fields.join(", "))
+            } else {
+                "object".to_string()
+            }
+        }
+        Some(other) => other.to_string(),
+        None => "any".to_string(),
+    }
+}
+
+fn format_schema_annotation(schema: &serde_json::Value) -> Option<String> {
+    if let Some(values) = schema.get("enum").and_then(|v| v.as_array()) {
+        let rendered: Vec<String> = values
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| format!("\"{}\"", s)))
+            .collect();
+        if !rendered.is_empty() {
+            return Some(rendered.join("|"));
+        }
+    }
+
+    schema
+        .get("description")
+        .and_then(|d| d.as_str())
+        .map(str::to_string)
+}
+
+fn build_search_text(def: &ToolDefinition) -> String {
+    let mut parts = vec![def.name.clone(), def.name.replace('_', " ")];
+
+    if let Some(desc) = &def.description {
+        parts.push(desc.clone());
+    }
+
+    collect_schema_terms(&def.input_schema, &mut parts);
+    if let Some(output_schema) = &def.output_schema {
+        collect_schema_terms(output_schema, &mut parts);
+    }
+
+    parts.join(" ")
+}
+
+fn collect_schema_terms(schema: &serde_json::Value, parts: &mut Vec<String>) {
+    if let Some(obj) = schema.as_object() {
+        if let Some(description) = obj.get("description").and_then(|d| d.as_str()) {
+            parts.push(description.to_string());
+        }
+
+        if let Some(values) = obj.get("enum").and_then(|v| v.as_array()) {
+            for value in values {
+                if let Some(s) = value.as_str() {
+                    parts.push(s.to_string());
+                }
+            }
+        }
+
+        if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
+            for (name, child) in props {
+                parts.push(name.clone());
+                parts.push(name.replace('_', " "));
+                collect_schema_terms(child, parts);
+            }
+        }
+
+        if let Some(items) = obj.get("items") {
+            collect_schema_terms(items, parts);
+        }
+
+        if let Some(additional) = obj.get("additionalProperties") {
+            collect_schema_terms(additional, parts);
+        }
+    }
+}
+
+fn normalize_identifier(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn compute_suggestion_score(normalized_query: &str, candidate: &str) -> f64 {
+    let normalized_candidate = normalize_identifier(candidate);
+    if normalized_candidate.is_empty() {
+        return 0.0;
+    }
+
+    if normalized_candidate == normalized_query {
+        return 1.0;
+    }
+
+    let max_len = normalized_query.len().max(normalized_candidate.len()) as f64;
+    let distance = levenshtein(normalized_query, &normalized_candidate) as f64;
+    let similarity = (1.0 - distance / max_len).max(0.0);
+    let contains_bonus = if normalized_candidate.contains(normalized_query)
+        || normalized_query.contains(&normalized_candidate)
+    {
+        0.15
+    } else {
+        0.0
+    };
+    let prefix_bonus = if normalized_candidate.starts_with(normalized_query)
+        || normalized_query.starts_with(&normalized_candidate)
+    {
+        0.1
+    } else {
+        0.0
+    };
+
+    (similarity + contains_bonus + prefix_bonus).min(1.0)
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    if a == b {
+        return 0;
+    }
+    if a.is_empty() {
+        return b.chars().count();
+    }
+    if b.is_empty() {
+        return a.chars().count();
+    }
+
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut costs: Vec<usize> = (0..=b_chars.len()).collect();
+
+    for (i, a_char) in a.chars().enumerate() {
+        let mut prev = costs[0];
+        costs[0] = i + 1;
+
+        for (j, b_char) in b_chars.iter().enumerate() {
+            let temp = costs[j + 1];
+            let substitution = if a_char == *b_char { prev } else { prev + 1 };
+            let insertion = costs[j + 1] + 1;
+            let deletion = costs[j] + 1;
+            costs[j + 1] = substitution.min(insertion).min(deletion);
+            prev = temp;
+        }
+    }
+
+    *costs.last().unwrap_or(&0)
 }
 
 fn compute_score(query_terms: &[&str], full_query: &str, text: &str) -> f64 {
@@ -218,6 +497,7 @@ mod tests {
                 },
                 "required": ["repo", "title"]
             }),
+            output_schema: None,
         }
     }
 
@@ -348,6 +628,47 @@ mod tests {
     }
 
     #[test]
+    fn test_search_tools_by_schema_fields_and_descriptions() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "create_ticket".to_string(),
+                description: Some("Create a customer support ticket".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "priority": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high"]
+                        },
+                        "subject": {
+                            "type": "string",
+                            "description": "Ticket subject line"
+                        }
+                    }
+                }),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": {"type": "string"},
+                        "status": {"type": "string"}
+                    }
+                })),
+            })
+            .unwrap();
+
+        assert_eq!(
+            registry.search_tools("ticket_id", 5)[0].name,
+            "create_ticket"
+        );
+        assert_eq!(
+            registry.search_tools("subject line", 5)[0].name,
+            "create_ticket"
+        );
+        assert_eq!(registry.search_tools("high", 5)[0].name, "create_ticket");
+    }
+
+    #[test]
     fn test_search_tools_case_insensitive() {
         let registry = ToolRegistry::new();
         registry
@@ -406,6 +727,7 @@ mod tests {
                 name: "special_tool".to_string(),
                 description: None,
                 input_schema: serde_json::json!({}),
+                output_schema: None,
             })
             .unwrap();
 
@@ -433,6 +755,36 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_catalog_renders_param_descriptions_and_enum_values() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "create_ticket".to_string(),
+                description: Some("Create a ticket".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "priority": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high"]
+                        },
+                        "subject": {
+                            "type": "string",
+                            "description": "Ticket subject line"
+                        }
+                    },
+                    "required": ["priority", "subject"]
+                }),
+                output_schema: None,
+            })
+            .unwrap();
+
+        let catalog = registry.tool_catalog();
+        assert!(catalog.contains("priority: string (\"low\"|\"medium\"|\"high\")"));
+        assert!(catalog.contains("subject: string (Ticket subject line)"));
+    }
+
+    #[test]
     fn test_unregister() {
         let registry = ToolRegistry::new();
         registry
@@ -449,10 +801,7 @@ mod tests {
     fn test_clear() {
         let registry = ToolRegistry::new();
         registry
-            .register_tools(vec![
-                create_test_tool("a", "A"),
-                create_test_tool("b", "B"),
-            ])
+            .register_tools(vec![create_test_tool("a", "A"), create_test_tool("b", "B")])
             .unwrap();
         assert_eq!(registry.tool_count(), 2);
 
@@ -467,6 +816,7 @@ mod tests {
             name: "invalid-tool-name!".to_string(),
             description: Some("Invalid".to_string()),
             input_schema: serde_json::json!({}),
+            output_schema: None,
         });
         assert!(result.is_err());
         assert_eq!(registry.tool_count(), 0);
@@ -524,5 +874,207 @@ mod tests {
         let terms: Vec<&str> = vec![];
         let score = compute_score(&terms, "", "some text");
         assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_suggest_tools_for_typo() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tools(vec![
+                create_test_tool("create_ticket", "Create a support ticket"),
+                create_test_tool("create_task", "Create a task"),
+            ])
+            .unwrap();
+
+        let suggestions = registry.suggest_tools("create_tiket", 3);
+        assert_eq!(suggestions[0], "create_ticket");
+        assert!(suggestions.contains(&"create_task".to_string()));
+    }
+
+    // === format_output_schema ===
+
+    #[test]
+    fn test_format_output_schema_object() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ticket_id": {"type": "string"},
+                "status": {"type": "string"}
+            }
+        });
+        let formatted = format_output_schema(&schema);
+        assert!(formatted.starts_with('{'));
+        assert!(formatted.ends_with('}'));
+        assert!(formatted.contains("ticket_id: string"));
+        assert!(formatted.contains("status: string"));
+    }
+
+    #[test]
+    fn test_format_output_schema_simple_type() {
+        let schema = serde_json::json!({"type": "string"});
+        assert_eq!(format_output_schema(&schema), "string");
+    }
+
+    #[test]
+    fn test_format_output_schema_no_type() {
+        let schema = serde_json::json!({});
+        assert_eq!(format_output_schema(&schema), "any");
+    }
+
+    #[test]
+    fn test_catalog_with_output_schema() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "create_ticket".to_string(),
+                description: Some("Create a ticket".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"subject": {"type": "string"}},
+                    "required": ["subject"]
+                }),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": {"type": "string"},
+                        "status": {"type": "string"}
+                    }
+                })),
+            })
+            .unwrap();
+
+        let catalog = registry.tool_catalog();
+        assert!(catalog.contains("create_ticket("));
+        assert!(catalog.contains("-> {"));
+        assert!(catalog.contains("ticket_id: string"));
+    }
+
+    #[test]
+    fn test_catalog_without_output_schema() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(create_test_tool("echo", "Echo tool"))
+            .unwrap();
+
+        let catalog = registry.tool_catalog();
+        assert!(catalog.contains("echo("));
+        assert!(!catalog.contains("->"));
+    }
+
+    #[test]
+    fn test_execute_description_mentions_batch_independence() {
+        let registry = ToolRegistry::new();
+        let description = registry.execute_tool_description();
+        assert!(description.contains("INDEPENDENT"));
+        assert!(description.contains("Do NOT use batch_tools()"));
+    }
+
+    // === system_prompt ===
+
+    #[test]
+    fn test_system_prompt_contains_key_instructions() {
+        let registry = ToolRegistry::new();
+        let prompt = registry.system_prompt();
+        assert!(prompt.contains("FRESH sandbox"));
+        assert!(prompt.contains("SINGLE script"));
+        assert!(prompt.contains("batch_tools()"));
+        assert!(prompt.contains("LAST EXPRESSION"));
+        assert!(prompt.contains("Do NOT use print()"));
+        assert!(prompt.contains("NameError"));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_good_and_bad_examples() {
+        let registry = ToolRegistry::new();
+        let prompt = registry.system_prompt();
+        assert!(prompt.contains("GOOD:"));
+        assert!(prompt.contains("BAD:"));
+    }
+
+    // === execute_tool_input_schema ===
+
+    #[test]
+    fn test_execute_tool_input_schema_structure() {
+        let registry = ToolRegistry::new();
+        let schema = registry.execute_tool_input_schema();
+
+        assert_eq!(schema["type"], "object");
+
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("code"));
+        assert!(props.contains_key("inputs"));
+
+        assert_eq!(props["code"]["type"], "string");
+        assert_eq!(props["inputs"]["type"], "object");
+
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "code");
+    }
+
+    #[test]
+    fn test_execute_tool_input_schema_has_descriptions() {
+        let registry = ToolRegistry::new();
+        let schema = registry.execute_tool_input_schema();
+        let props = schema["properties"].as_object().unwrap();
+
+        assert!(props["code"]["description"].as_str().unwrap().contains("Python"));
+        assert!(props["inputs"]["description"].as_str().unwrap().contains("Variables"));
+    }
+
+    // === search_tool_input_schema ===
+
+    #[test]
+    fn test_search_tool_input_schema_structure() {
+        let registry = ToolRegistry::new();
+        let schema = registry.search_tool_input_schema();
+
+        assert_eq!(schema["type"], "object");
+
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("query"));
+        assert!(props.contains_key("top_k"));
+
+        assert_eq!(props["query"]["type"], "string");
+        assert_eq!(props["top_k"]["type"], "number");
+
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "query");
+    }
+
+    #[test]
+    fn test_search_tool_input_schema_top_k_not_required() {
+        let registry = ToolRegistry::new();
+        let schema = registry.search_tool_input_schema();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(!required.contains(&"top_k"));
+    }
+
+    // === execute_tool_description embeds catalog ===
+
+    #[test]
+    fn test_execute_description_embeds_tool_catalog() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(create_test_tool("my_tool", "Does something"))
+            .unwrap();
+        let desc = registry.execute_tool_description();
+        assert!(desc.contains("my_tool("));
+        assert!(desc.contains("Does something"));
+    }
+
+    #[test]
+    fn test_execute_description_mentions_runtime_restrictions() {
+        let registry = ToolRegistry::new();
+        let desc = registry.execute_tool_description();
+        assert!(desc.contains("No standard library"));
+        assert!(desc.contains("No class definitions"));
+        assert!(desc.contains("sorted()"));
     }
 }

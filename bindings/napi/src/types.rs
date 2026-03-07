@@ -60,6 +60,7 @@ pub struct NapiToolDefinition {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Result of executing a script, returned to JS.
@@ -101,6 +102,7 @@ pub struct NapiSearchResult {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
+    pub output_schema: Option<serde_json::Value>,
 }
 
 // --- Conversions from core types ---
@@ -148,6 +150,7 @@ impl From<&montygate_core::types::ToolDefinition> for NapiSearchResult {
             name: def.name.clone(),
             description: def.description.clone(),
             input_schema: def.input_schema.clone(),
+            output_schema: def.output_schema.clone(),
         }
     }
 }
@@ -158,6 +161,7 @@ impl From<&NapiToolDefinition> for montygate_core::types::ToolDefinition {
             name: def.name.clone(),
             description: def.description.clone(),
             input_schema: def.input_schema.clone(),
+            output_schema: def.output_schema.clone(),
         }
     }
 }

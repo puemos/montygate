@@ -31,6 +31,16 @@ export declare class NativeEngine {
   search(query: string, topK?: number | undefined | null): Array<NapiSearchResult>
   /** Get a formatted catalog of all registered tools (for LLM descriptions). */
   getToolCatalog(): string
+  /** Get the canonical "execute" tool description for LLM adapters. */
+  getExecuteToolDescription(): string
+  /** Get the canonical "search" tool description for LLM adapters. */
+  getSearchToolDescription(): string
+  /** Get the canonical system prompt for guiding LLMs. */
+  getSystemPrompt(): string
+  /** Get the canonical JSON Schema for the execute tool's input parameters. */
+  getExecuteToolInputSchema(): any
+  /** Get the canonical JSON Schema for the search tool's input parameters. */
+  getSearchToolInputSchema(): any
   /** Get the number of registered tools. */
   toolCount(): number
   /** Get all trace entries recorded so far. */
@@ -102,6 +112,7 @@ export interface NapiSearchResult {
   name: string
   description?: string
   inputSchema: any
+  outputSchema?: any
 }
 
 /** Tool definition passed from JS when registering a tool. */
@@ -109,6 +120,7 @@ export interface NapiToolDefinition {
   name: string
   description?: string
   inputSchema: any
+  outputSchema?: any
 }
 
 export interface NapiTraceEntry {
