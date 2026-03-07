@@ -1,13 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Montygate } from "../engine.js";
-import { handleAnthropicToolCall, toAnthropic } from "./anthropic.js";
-import { handleOpenAIToolCall, toOpenAI } from "./openai.js";
+import { Montygate } from "../engine.js";
 import { buildTraceSummary, unwrapExecutionResult } from "./utils.js";
-import { toVercelAI } from "./vercel-ai.js";
 
 function createMockEngine(): Montygate {
   const catalog = "- lookup_order(order_id: string) - Look up an order\n";
-  return {
+  const engine = {
     getToolCatalog: vi.fn(() => catalog),
     getExecuteToolDescription: vi.fn(
       () =>
@@ -59,10 +56,16 @@ function createMockEngine(): Montygate {
     getTools: vi.fn(() => []),
     getTraces: vi.fn(() => []),
     clearTraces: vi.fn(),
-  } as unknown as Montygate;
+  };
+  // Bind real class methods to the mock so .anthropic(), .openai(), etc. work
+  engine.anthropic = Montygate.prototype.anthropic.bind(engine);
+  engine.openai = Montygate.prototype.openai.bind(engine);
+  engine.vercelai = Montygate.prototype.vercelai.bind(engine);
+  engine.handleToolCall = Montygate.prototype.handleToolCall.bind(engine);
+  return engine as unknown as Montygate;
 }
 
-describe("toAnthropic", () => {
+describe("gate.anthropic()", () => {
   let engine: Montygate;
 
   beforeEach(() => {
@@ -70,48 +73,110 @@ describe("toAnthropic", () => {
   });
 
   it("returns execute and search tools", () => {
-    const tools = toAnthropic(engine);
+    const tools = engine.anthropic();
     expect(tools).toHaveLength(2);
     expect(tools[0].name).toBe("execute");
     expect(tools[1].name).toBe("search");
   });
 
   it("execute tool includes tool catalog and usage instructions in description", () => {
-    const tools = toAnthropic(engine);
+    const tools = engine.anthropic();
     expect(tools[0].description).toContain("lookup_order");
     expect(tools[0].description).toContain("LAST EXPRESSION");
     expect(tools[0].description).toContain("Do NOT use print()");
   });
 
   it("execute tool has correct input_schema", () => {
-    const tools = toAnthropic(engine);
+    const tools = engine.anthropic();
     expect(tools[0].input_schema.type).toBe("object");
     expect(tools[0].input_schema.properties).toHaveProperty("code");
     expect(tools[0].input_schema.required).toContain("code");
   });
 
   it("search tool has correct input_schema", () => {
-    const tools = toAnthropic(engine);
+    const tools = engine.anthropic();
     expect(tools[1].input_schema.properties).toHaveProperty("query");
     expect(tools[1].input_schema.required).toContain("query");
   });
 
   it("reads schemas from engine instead of hardcoding", () => {
-    toAnthropic(engine);
+    engine.anthropic();
     expect(engine.getExecuteToolInputSchema).toHaveBeenCalled();
     expect(engine.getSearchToolInputSchema).toHaveBeenCalled();
   });
 });
 
-describe("handleAnthropicToolCall", () => {
+describe("gate.openai()", () => {
   let engine: Montygate;
 
   beforeEach(() => {
     engine = createMockEngine();
   });
 
-  it("dispatches execute call", async () => {
-    const result = await handleAnthropicToolCall(engine, "execute", {
+  it("returns function type tools", () => {
+    const tools = engine.openai();
+    expect(tools).toHaveLength(2);
+    expect(tools[0].type).toBe("function");
+    expect(tools[0].function.name).toBe("execute");
+    expect(tools[1].type).toBe("function");
+    expect(tools[1].function.name).toBe("search");
+  });
+
+  it("execute tool has parameters", () => {
+    const tools = engine.openai();
+    expect(tools[0].function.parameters.type).toBe("object");
+    expect(tools[0].function.parameters.properties).toHaveProperty("code");
+  });
+
+  it("reads schemas from engine instead of hardcoding", () => {
+    engine.openai();
+    expect(engine.getExecuteToolInputSchema).toHaveBeenCalled();
+    expect(engine.getSearchToolInputSchema).toHaveBeenCalled();
+  });
+});
+
+describe("gate.vercelai()", () => {
+  let engine: Montygate;
+
+  beforeEach(() => {
+    engine = createMockEngine();
+  });
+
+  it("returns execute and search tools", () => {
+    const tools = engine.vercelai();
+    expect(tools).toHaveProperty("execute");
+    expect(tools).toHaveProperty("search");
+  });
+
+  it("execute tool has description with instructions and parameters", () => {
+    const tools = engine.vercelai();
+    expect(tools.execute.description).toContain("lookup_order");
+    expect(tools.execute.description).toContain("LAST EXPRESSION");
+    expect(tools.execute.parameters).toBeDefined();
+  });
+
+  it("execute tool dispatches correctly", async () => {
+    const tools = engine.vercelai();
+    const result = await tools.execute.execute({ code: "42" });
+    expect(result).toEqual({ id: "123", status: "shipped" });
+  });
+
+  it("search tool dispatches correctly", async () => {
+    const tools = engine.vercelai();
+    const result = await tools.search.execute({ query: "order" });
+    expect(result).toHaveLength(1);
+  });
+});
+
+describe("gate.handleToolCall()", () => {
+  let engine: Montygate;
+
+  beforeEach(() => {
+    engine = createMockEngine();
+  });
+
+  it("dispatches execute call with object args", async () => {
+    const result = await engine.handleToolCall("execute", {
       code: "tool('lookup_order', order_id='123')",
     });
     expect(result).toEqual({ id: "123", status: "shipped" });
@@ -121,8 +186,16 @@ describe("handleAnthropicToolCall", () => {
     );
   });
 
+  it("dispatches execute call with JSON string args (OpenAI style)", async () => {
+    const result = await engine.handleToolCall(
+      "execute",
+      JSON.stringify({ code: "42" }),
+    );
+    expect(result).toEqual({ id: "123", status: "shipped" });
+  });
+
   it("dispatches search call", async () => {
-    const result = await handleAnthropicToolCall(engine, "search", {
+    const result = await engine.handleToolCall("search", {
       query: "order",
     });
     expect(result).toHaveLength(1);
@@ -131,98 +204,8 @@ describe("handleAnthropicToolCall", () => {
 
   it("throws for unknown tool", async () => {
     await expect(
-      handleAnthropicToolCall(engine, "unknown", {}),
+      engine.handleToolCall("unknown", {}),
     ).rejects.toThrow("Unknown tool: unknown");
-  });
-});
-
-describe("toOpenAI", () => {
-  let engine: Montygate;
-
-  beforeEach(() => {
-    engine = createMockEngine();
-  });
-
-  it("returns function type tools", () => {
-    const tools = toOpenAI(engine);
-    expect(tools).toHaveLength(2);
-    expect(tools[0].type).toBe("function");
-    expect(tools[0].function.name).toBe("execute");
-    expect(tools[1].type).toBe("function");
-    expect(tools[1].function.name).toBe("search");
-  });
-
-  it("execute tool has parameters", () => {
-    const tools = toOpenAI(engine);
-    expect(tools[0].function.parameters.type).toBe("object");
-    expect(tools[0].function.parameters.properties).toHaveProperty("code");
-  });
-
-  it("reads schemas from engine instead of hardcoding", () => {
-    toOpenAI(engine);
-    expect(engine.getExecuteToolInputSchema).toHaveBeenCalled();
-    expect(engine.getSearchToolInputSchema).toHaveBeenCalled();
-  });
-});
-
-describe("handleOpenAIToolCall", () => {
-  let engine: Montygate;
-
-  beforeEach(() => {
-    engine = createMockEngine();
-  });
-
-  it("dispatches execute and returns JSON string", async () => {
-    const result = await handleOpenAIToolCall(
-      engine,
-      "execute",
-      JSON.stringify({ code: "42" }),
-    );
-    expect(JSON.parse(result)).toEqual({ id: "123", status: "shipped" });
-  });
-
-  it("dispatches search and returns JSON string", async () => {
-    const result = await handleOpenAIToolCall(
-      engine,
-      "search",
-      JSON.stringify({ query: "order" }),
-    );
-    const parsed = JSON.parse(result);
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0].name).toBe("lookup_order");
-  });
-});
-
-describe("toVercelAI", () => {
-  let engine: Montygate;
-
-  beforeEach(() => {
-    engine = createMockEngine();
-  });
-
-  it("returns execute and search tools", () => {
-    const tools = toVercelAI(engine);
-    expect(tools).toHaveProperty("execute");
-    expect(tools).toHaveProperty("search");
-  });
-
-  it("execute tool has description with instructions and parameters", () => {
-    const tools = toVercelAI(engine);
-    expect(tools.execute.description).toContain("lookup_order");
-    expect(tools.execute.description).toContain("LAST EXPRESSION");
-    expect(tools.execute.parameters).toBeDefined();
-  });
-
-  it("execute tool dispatches correctly", async () => {
-    const tools = toVercelAI(engine);
-    const result = await tools.execute.execute({ code: "42" });
-    expect(result).toEqual({ id: "123", status: "shipped" });
-  });
-
-  it("search tool dispatches correctly", async () => {
-    const tools = toVercelAI(engine);
-    const result = await tools.search.execute({ query: "order" });
-    expect(result).toHaveLength(1);
   });
 });
 
@@ -387,7 +370,7 @@ describe("buildTraceSummary", () => {
 
 describe("adapter error detection", () => {
   function createErrorEngine(): Montygate {
-    return {
+    const engine = {
       getToolCatalog: vi.fn(() => ""),
       getExecuteToolDescription: vi.fn(() => ""),
       getSearchToolDescription: vi.fn(() => ""),
@@ -434,30 +417,29 @@ describe("adapter error detection", () => {
       getTools: vi.fn(() => []),
       getTraces: vi.fn(() => []),
       clearTraces: vi.fn(),
-    } as unknown as Montygate;
+    };
+    engine.handleToolCall = Montygate.prototype.handleToolCall.bind(engine);
+    engine.vercelai = Montygate.prototype.vercelai.bind(engine);
+    return engine as unknown as Montygate;
   }
 
-  it("handleAnthropicToolCall throws on sandbox error", async () => {
+  it("handleToolCall throws on sandbox error (object args)", async () => {
     const engine = createErrorEngine();
     await expect(
-      handleAnthropicToolCall(engine, "execute", { code: "order" }),
+      engine.handleToolCall("execute", { code: "order" }),
     ).rejects.toThrow("NameError");
   });
 
-  it("handleOpenAIToolCall throws on sandbox error", async () => {
+  it("handleToolCall throws on sandbox error (JSON string args)", async () => {
     const engine = createErrorEngine();
     await expect(
-      handleOpenAIToolCall(
-        engine,
-        "execute",
-        JSON.stringify({ code: "order" }),
-      ),
+      engine.handleToolCall("execute", JSON.stringify({ code: "order" })),
     ).rejects.toThrow("NameError");
   });
 
-  it("toVercelAI execute throws on sandbox error", async () => {
+  it("vercelai execute throws on sandbox error", async () => {
     const engine = createErrorEngine();
-    const tools = toVercelAI(engine);
+    const tools = engine.vercelai();
     await expect(tools.execute.execute({ code: "order" })).rejects.toThrow(
       "NameError",
     );

@@ -1,8 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { handleAnthropicToolCall, toAnthropic } from "./adapters/anthropic.js";
-import { handleOpenAIToolCall, toOpenAI } from "./adapters/openai.js";
-import { toVercelAI } from "./adapters/vercel-ai.js";
 import { Montygate } from "./engine.js";
 import type { ToolHandlerMap } from "./normalize.js";
 
@@ -401,36 +398,32 @@ describe("e2e: adapter round-trip with real engine", () => {
     });
   });
 
-  it("Anthropic adapter: toAnthropic → handleAnthropicToolCall round-trip", async () => {
-    const tools = toAnthropic(gate);
+  it("gate.anthropic() → gate.handleToolCall() round-trip", async () => {
+    const tools = gate.anthropic();
     expect(tools).toHaveLength(2);
     expect(tools[0].description).toContain("get_weather");
 
-    // Simulate LLM calling the execute tool
-    const result = await handleAnthropicToolCall(gate, "execute", {
+    const result = await gate.handleToolCall("execute", {
       code: "tool('get_weather', city='Paris')",
     });
 
     expect(result).toEqual({ city: "Paris", temp: 22, condition: "sunny" });
   });
 
-  it("OpenAI adapter: toOpenAI → handleOpenAIToolCall round-trip", async () => {
-    const tools = toOpenAI(gate);
+  it("gate.openai() → gate.handleToolCall() round-trip (JSON string args)", async () => {
+    const tools = gate.openai();
     expect(tools[0].function.name).toBe("execute");
 
-    // OpenAI sends args as JSON string
-    const result = await handleOpenAIToolCall(
-      gate,
+    const result = await gate.handleToolCall(
       "execute",
       JSON.stringify({ code: "tool('get_weather', city='Tokyo')" }),
     );
 
-    const parsed = JSON.parse(result);
-    expect(parsed).toEqual({ city: "Tokyo", temp: 22, condition: "sunny" });
+    expect(result).toEqual({ city: "Tokyo", temp: 22, condition: "sunny" });
   });
 
-  it("Vercel AI adapter: toVercelAI → execute round-trip", async () => {
-    const tools = toVercelAI(gate);
+  it("gate.vercelai() → execute round-trip", async () => {
+    const tools = gate.vercelai();
 
     const result = await tools.execute.execute({
       code: "tool('get_weather', city='London')",
@@ -439,14 +432,14 @@ describe("e2e: adapter round-trip with real engine", () => {
     expect(result).toEqual({ city: "London", temp: 22, condition: "sunny" });
   });
 
-  it("adapter search round-trip with real engine", async () => {
-    const searchResult = await handleAnthropicToolCall(gate, "search", {
+  it("handleToolCall search round-trip with real engine", async () => {
+    const results = await gate.handleToolCall("search", {
       query: "weather",
     });
 
-    const results = searchResult as Array<{ name: string }>;
-    expect(results.length).toBeGreaterThanOrEqual(1);
-    expect(results[0].name).toBe("get_weather");
+    const hits = results as Array<{ name: string }>;
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+    expect(hits[0].name).toBe("get_weather");
   });
 });
 
@@ -508,8 +501,8 @@ describe("e2e: centralized schemas", () => {
   it("adapter schemas match the centralized execute schema", () => {
     const gate = new Montygate();
     const centralSchema = gate.getExecuteToolInputSchema();
-    const anthropicTools = toAnthropic(gate);
-    const openaiTools = toOpenAI(gate);
+    const anthropicTools = gate.anthropic();
+    const openaiTools = gate.openai();
 
     // Anthropic input_schema should be the same object structure
     expect(anthropicTools[0].input_schema).toEqual(centralSchema);
@@ -520,8 +513,8 @@ describe("e2e: centralized schemas", () => {
   it("adapter schemas match the centralized search schema", () => {
     const gate = new Montygate();
     const centralSchema = gate.getSearchToolInputSchema();
-    const anthropicTools = toAnthropic(gate);
-    const openaiTools = toOpenAI(gate);
+    const anthropicTools = gate.anthropic();
+    const openaiTools = gate.openai();
 
     expect(anthropicTools[1].input_schema).toEqual(centralSchema);
     expect(openaiTools[1].function.parameters).toEqual(centralSchema);
