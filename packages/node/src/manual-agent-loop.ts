@@ -11,7 +11,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { Montygate, toAnthropic, handleAnthropicToolCall } from "./index.js";
+import { handleAnthropicToolCall, Montygate, toAnthropic } from "./index.js";
 
 // ── Setup ──────────────────────────────────────────────────────────────────
 
@@ -51,9 +51,7 @@ gate.tool("create_ticket", {
   params: z.object({
     subject: z.string().describe("Ticket subject line"),
     body: z.string().describe("Ticket body / description"),
-    priority: z
-      .enum(["low", "medium", "high"])
-      .describe("Ticket priority"),
+    priority: z.enum(["low", "medium", "high"]).describe("Ticket priority"),
   }),
   returns: z.object({
     ticket_id: z.string(),
@@ -163,9 +161,7 @@ async function agentLoop(userMessage: string) {
             block.name,
             block.input as Record<string, unknown>,
           );
-          console.log(
-            `  Result: ${JSON.stringify(result, null, 2)}`,
-          );
+          console.log(`  Result: ${JSON.stringify(result, null, 2)}`);
 
           toolResults.push({
             type: "tool_result",
@@ -173,8 +169,7 @@ async function agentLoop(userMessage: string) {
             content: JSON.stringify(result),
           });
         } catch (err) {
-          const errorMsg =
-            err instanceof Error ? err.message : String(err);
+          const errorMsg = err instanceof Error ? err.message : String(err);
           console.log(`  Error: ${errorMsg}`);
 
           toolResults.push({
@@ -197,9 +192,7 @@ async function agentLoop(userMessage: string) {
   // Print traces
   const traces = gate.getTraces();
   if (traces.length > 0) {
-    console.log(
-      `\n--- Execution traces (${traces.length} tool calls) ---`,
-    );
+    console.log(`\n--- Execution traces (${traces.length} tool calls) ---`);
     for (const t of traces) {
       const status = t.error ? `ERROR: ${t.error}` : "OK";
       console.log(`  ${t.toolName}: ${t.durationMs}ms [${status}]`);

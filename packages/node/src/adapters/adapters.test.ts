@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Montygate } from "../engine.js";
-import { toAnthropic, handleAnthropicToolCall } from "./anthropic.js";
-import { toOpenAI, handleOpenAIToolCall } from "./openai.js";
-import { toVercelAI } from "./vercel-ai.js";
+import { handleAnthropicToolCall, toAnthropic } from "./anthropic.js";
+import { handleOpenAIToolCall, toOpenAI } from "./openai.js";
 import { buildTraceSummary, unwrapExecutionResult } from "./utils.js";
+import { toVercelAI } from "./vercel-ai.js";
 
 function createMockEngine(): Montygate {
   const catalog = "- lookup_order(order_id: string) - Look up an order\n";
@@ -268,7 +268,10 @@ describe("unwrapExecutionResult", () => {
   it("includes fresh sandbox hint in error message", () => {
     expect(() =>
       unwrapExecutionResult({
-        output: { status: "error", error: "NameError: name 'x' is not defined" },
+        output: {
+          status: "error",
+          error: "NameError: name 'x' is not defined",
+        },
         stdout: "",
         stderr: "",
         trace: [],
@@ -286,7 +289,10 @@ describe("unwrapExecutionResult", () => {
   it("includes prior successful tool outputs in error messages", () => {
     expect(() =>
       unwrapExecutionResult({
-        output: { status: "error", error: "NameError: name 'ticket' is not defined" },
+        output: {
+          status: "error",
+          error: "NameError: name 'ticket' is not defined",
+        },
         stdout: "",
         stderr: "",
         trace: [
@@ -452,8 +458,8 @@ describe("adapter error detection", () => {
   it("toVercelAI execute throws on sandbox error", async () => {
     const engine = createErrorEngine();
     const tools = toVercelAI(engine);
-    await expect(
-      tools.execute.execute({ code: "order" }),
-    ).rejects.toThrow("NameError");
+    await expect(tools.execute.execute({ code: "order" })).rejects.toThrow(
+      "NameError",
+    );
   });
 });

@@ -43,10 +43,7 @@ export function toVercelAI(engine: Montygate): Record<string, VercelAIToolDef> {
       description: engine.getSearchToolDescription(),
       parameters: z.object({
         query: z.string().describe("Search query"),
-        top_k: z
-          .number()
-          .optional()
-          .describe("Maximum number of results"),
+        top_k: z.number().optional().describe("Maximum number of results"),
       }),
       execute: async (args) => {
         return engine.search(

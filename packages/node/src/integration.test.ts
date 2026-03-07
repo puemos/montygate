@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import path from "path";
+import path from "node:path";
+import { beforeEach, describe, expect, it } from "vitest";
 
 // Load native binding directly for integration testing
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -125,7 +125,11 @@ describe("NativeEngine integration", () => {
         description: "Look up order",
         inputSchema: { type: "object" },
       },
-      async () => ({ id: "ORD-123", email: "user@example.com", status: "late" }),
+      async () => ({
+        id: "ORD-123",
+        email: "user@example.com",
+        status: "late",
+      }),
     );
     engine.registerTool(
       {
