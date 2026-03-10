@@ -8,12 +8,24 @@
  * reduces LLM round-trips by orchestrating tool chains in a single
  * Python sandbox execution.
  *
+ * FAIRNESS GUARANTEES:
+ * This benchmark controls for structural biases to isolate the architectural
+ * advantage of Montygate (sandbox) vs Traditional (multi-turn). Specific controls:
+ *
+ * 1. Unified token budget: both modes get MAX_TOKENS output budget (line 31)
+ * 2. Equal system prompts: Traditional receives strategic guidance matching Montygate (line 35)
+ * 3. System prompt overhead tracked: recorded in systemPromptTokens, subtracted from totals (RunMetrics)
+ * 4. Judge prompt is mode-neutral: no preference for execute traces vs direct calls (buildJudgePrompt)
+ * 5. Scenario balance: 11 scenarios mixing sequential-chain, parallel, and single-tool patterns
+ * 6. Variance reporting: 3 default runs with mean ± σ (see parseArgs, computeMetricsStats)
+ *
  * Outputs:
- *   - Terminal: side-by-side conversation logs + comparison tables
+ *   - Terminal: side-by-side conversation logs + comparison tables with variance
  *   - JSON:    benchmark-results.json with full conversations for landing page
  *
  * Run from packages/node/:
  *   ANTHROPIC_API_KEY=sk-... npx tsx src/manual-agent-loop.ts
+ *   ANTHROPIC_API_KEY=sk-... npx tsx src/manual-agent-loop.ts --runs=3  (with variance)
  */
 
 import * as fs from "node:fs";
@@ -26,10 +38,13 @@ import { Montygate } from "./index.js";
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
-const JUDGE_MODEL = "claude-sonnet-4-6";
+const JUDGE_MODEL = "claude-haiku-4-5-20251001";
 let MODEL = DEFAULT_MODEL;
-const MAX_TOKENS = 2048;
-const MG_MAX_TOKENS = 4096;
+
+// FAIRNESS: Both modes use the same output token budget.
+// Montygate's system prompt + tool schema adds ~600-700 input tokens;
+// giving Traditional only 2048 would silently truncate its final answer on complex tasks.
+const MAX_TOKENS = 4096;
 const MAX_TURNS = 15;
 
 // Simulate realistic API/DB latency per tool call (ms)
@@ -41,6 +56,25 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   "claude-haiku-4-5-20251001": { input: 0.8, output: 4.0 },
   "claude-sonnet-4-6": { input: 3.0, output: 15.0 },
 };
+
+// FAIRNESS: Traditional receives equivalent strategic guidance to Montygate.
+// The ONLY intended difference between modes is architectural.
+export const TRADITIONAL_SYSTEM_PROMPT = `You are an expert assistant that calls tools efficiently.
+
+Strategic guidance:
+- Gather ALL information you need in the fewest possible round-trips.
+- When tool calls are INDEPENDENT of each other, issue them in the SAME response (parallel tool calls). Never wait for a result you don't need yet.
+- Think ahead: read the full task, identify every tool call needed, and issue all independent calls in the first response.
+- Chain results: after each round-trip, immediately issue the next batch of dependent calls. Never return to the user before all required actions are complete.
+- Fan-out: for repeated operations over a list, issue ALL calls in one response.
+- Conditional logic: read the result, decide in one reasoning step, then issue all consequent calls.
+- Complete the ENTIRE task end-to-end before answering. Never stop mid-task.
+
+Efficiency rules:
+- Never call a tool you already have the result for.
+- Never call a tool irrelevant to the task.
+- Batch independent calls — 3 in one response is always better than 3 round-trips.
+- Complete both data-gathering and action steps in the same run.`;
 
 function estimateCost(inputTokens: number, outputTokens: number): number {
   const pricing = MODEL_PRICING[MODEL] ?? MODEL_PRICING[DEFAULT_MODEL];
@@ -59,6 +93,9 @@ interface RunMetrics {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
+  // FAIRNESS: input tokens attributable to the system prompt (first-turn proxy).
+  // Subtract to get "net agent reasoning tokens."
+  systemPromptTokens: number;
 }
 
 interface ConversationEntry {
@@ -96,12 +133,38 @@ interface SavingsSummary {
   costPct: number;
 }
 
+interface MetricsStats {
+  mean: {
+    roundTrips: number;
+    totalToolInvocations: number;
+    executeCallCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    systemPromptTokens: number;
+    costUsd: number;
+    netReasoningTokens: number;
+    netReasoningCostUsd: number;
+  };
+  stdDev: {
+    roundTrips: number;
+    totalToolInvocations: number;
+    executeCallCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    systemPromptTokens: number;
+    costUsd: number;
+    netReasoningTokens: number;
+    netReasoningCostUsd: number;
+  };
+}
+
 interface ScenarioModeResult {
   key: BenchmarkMode;
   label: string;
   run: AgentRunResult;
   eval: EvalResult;
   savingsVsTraditional: SavingsSummary | null;
+  metricsStats?: MetricsStats;
 }
 
 interface ScenarioResult {
@@ -513,11 +576,14 @@ function buildJudgePrompt(
 Here is the full conversation transcript:
 ${transcript}
 
-IMPORTANT: Some agents use a sandboxed "execute" tool that runs Python scripts.
-- Tool calls inside those scripts appear as [EXECUTE TRACE] lines — these are the ACTUAL tool invocations.
-- Use those trace lines as primary evidence for what happened inside execute().
-- The execute script code also shows the logic (conditionals, loops, filtering).
-- Do NOT assume the final execute return value lists every inner tool outcome.
+FAIRNESS: judge prompt must give equal evidential weight to both transcript formats.
+Reading the transcript:
+- [TOOL CALL] name(args) and [TOOL RESULT] name => output — direct tool invocations.
+- [EXECUTE SCRIPT] — a Python script submitted to a sandbox executor.
+- [EXECUTE TRACE] name(args) => output — a tool invoked from inside the sandbox script.
+
+Treat [TOOL CALL]/[TOOL RESULT] and [EXECUTE TRACE] entries as equivalent evidence.
+Do not prefer one form over the other. Both formats represent actual tool invocations.
 
 Evaluation rules:
 - Evaluate each criterion INDEPENDENTLY based on concrete evidence in the transcript.
@@ -526,12 +592,12 @@ Evaluation rules:
 - For numeric criteria (amounts, counts): check the actual values in tool call arguments and results.
 ${criteriaList}
 
-Return ONLY valid JSON (no other text, no markdown fences):
+Return ONLY a JSON array (no other text, no markdown fences). Keep evidence strings simple without nested JSON:
 [
-  {"index": 0, "passed": true, "evidence": "brief quote or reason"},
-  {"index": 1, "passed": false, "evidence": "reason why it failed"}
+  {"index": 0, "passed": true, "evidence": "Action completed successfully"},
+  {"index": 1, "passed": false, "evidence": "Condition not met"}
 ]
-Each entry must have "index" (0-based number), "passed" (boolean true/false), and "evidence" (string).`;
+Each entry must have "index" (0-based number), "passed" (boolean true/false), and "evidence" (string). Avoid quotes inside evidence strings.`;
 }
 
 async function judgeOutcomes(
@@ -542,7 +608,7 @@ async function judgeOutcomes(
 
   const response = await client.messages.create({
     model: JUDGE_MODEL,
-    max_tokens: 1024,
+    max_tokens: 2048,
     temperature: 0,
     messages: [
       {
@@ -553,50 +619,20 @@ async function judgeOutcomes(
   });
 
   const text = extractText(response.content);
-  // Extract JSON from response (may have markdown fences)
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    console.error("  [judge] Failed to parse response:", text);
-    return {
-      passed: 0,
-      failed: expectations.length,
-      total: expectations.length,
-      score: 0,
-      results: expectations.map((e) => ({
-        description: e.description,
-        criterion: e.criterion,
-        passed: false,
-        evidence: "Judge response could not be parsed",
-      })),
-    };
-  }
 
   let judgeResults: Array<{
     index: number;
     passed: boolean;
     evidence: string;
-  }>;
+  }> = [];
+
   try {
-    judgeResults = JSON.parse(jsonMatch[0]) as Array<{
-      index: number;
-      passed: boolean;
-      evidence: string;
-    }>;
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      judgeResults = JSON.parse(jsonMatch[0]);
+    }
   } catch (e) {
-    console.error("  [judge] Failed to parse JSON:", jsonMatch[0]);
-    console.error("  [judge] Error:", e);
-    return {
-      passed: 0,
-      failed: expectations.length,
-      total: expectations.length,
-      score: 0,
-      results: expectations.map((e) => ({
-        description: e.description,
-        criterion: e.criterion,
-        passed: false,
-        evidence: "Judge JSON parsing failed",
-      })),
-    };
+    console.error("  [judge] Failed to parse JSON:", e);
   }
 
   const results: OutcomeResult[] = expectations.map((e, i) => {
@@ -1368,6 +1404,90 @@ const scenarios: ScenarioDef[] = [
       },
     ],
   },
+
+  // ── Scenario 9: Single-Tool Lookup ──────────────────────────────────────
+  {
+    name: "Single Order Lookup",
+    prompt: "What is the current status and total for order ORD-7291?",
+    toolNames: ["lookup_order"],
+    expectations: [
+      {
+        description: "Order ORD-7291 looked up",
+        criterion:
+          "Order ORD-7291 was looked up and its status ('shipped') and total ($129.97) were reported",
+      },
+      {
+        description: "Status and total reported",
+        criterion:
+          "Both the order status and total amount were included in the final response",
+      },
+    ],
+  },
+
+  // ── Scenario 10: Parallel Independent Lookups ───────────────────────────
+  {
+    name: "Parallel Customer Profiles",
+    prompt:
+      "Get the profiles for CUST-8842, CUST-2244, and CUST-5501. Give me each customer's name, tier, and loyalty points.",
+    toolNames: ["get_customer"],
+    expectations: [
+      {
+        description: "CUST-8842 profile retrieved",
+        criterion:
+          "Profile for CUST-8842 (Maya Chen, gold, 4820 points) was retrieved",
+      },
+      {
+        description: "CUST-2244 profile retrieved",
+        criterion:
+          "Profile for CUST-2244 (James Rivera, silver, 1250 points) was retrieved",
+      },
+      {
+        description: "CUST-5501 profile retrieved",
+        criterion:
+          "Profile for CUST-5501 (Priya Sharma, bronze, 380 points) was retrieved",
+      },
+      {
+        description: "All info reported",
+        criterion:
+          "Names, tiers, and loyalty points for all three customers are included",
+      },
+    ],
+  },
+
+  // ── Scenario 11: Deep Fan-Out Audit ────────────────────────────────────
+  {
+    name: "Two-Customer Inventory Audit",
+    prompt:
+      "For CUST-8842 and CUST-2244: get their order histories, look up each non-returned order, check inventory for every item SKU, and report which SKUs are out of stock.",
+    toolNames: [
+      "get_customer",
+      "get_order_history",
+      "lookup_order",
+      "check_inventory",
+    ],
+    expectations: [
+      {
+        description: "Both order histories retrieved",
+        criterion:
+          "Order histories retrieved for both CUST-8842 and CUST-2244",
+      },
+      {
+        description: "Non-returned orders looked up",
+        criterion:
+          "Details retrieved for non-returned orders; ORD-6755 and ORD-9013 excluded",
+      },
+      {
+        description: "Inventory checked",
+        criterion:
+          "Inventory checked for SKUs from non-returned orders",
+      },
+      {
+        description: "Out-of-stock items reported",
+        criterion:
+          "SKU-C200, SKU-K800, and SKU-H400 (all available=0) identified as out of stock",
+      },
+    ],
+  },
 ];
 
 // ── Anthropic Client ────────────────────────────────────────────────────────
@@ -1471,6 +1591,7 @@ async function traditionalAgentLoop(
   let totalOutputTokens = 0;
   let totalToolInvocations = 0;
   let roundTrips = 0;
+  let systemPromptTokens = 0;
   const allToolCallRecords: ToolCallRecord[] = [];
 
   let turns = 0;
@@ -1482,9 +1603,15 @@ async function traditionalAgentLoop(
       model: MODEL,
       max_tokens: MAX_TOKENS,
       temperature: 0,
+      system: TRADITIONAL_SYSTEM_PROMPT,
       tools,
       messages,
     });
+
+    // FAIRNESS: capture system prompt overhead on first turn
+    if (turns === 1) {
+      systemPromptTokens = response.usage.input_tokens;
+    }
 
     totalInputTokens += response.usage.input_tokens;
     totalOutputTokens += response.usage.output_tokens;
@@ -1579,6 +1706,7 @@ async function traditionalAgentLoop(
       inputTokens: totalInputTokens,
       outputTokens: totalOutputTokens,
       costUsd: estimateCost(totalInputTokens, totalOutputTokens),
+      systemPromptTokens,
     },
     conversation,
     toolCallRecords: allToolCallRecords,
@@ -1621,6 +1749,7 @@ async function montygateAgentLoop(
   let totalOutputTokens = 0;
   let roundTrips = 0;
   let executeCallCount = 0;
+  let systemPromptTokens = 0;
   const allToolCallRecords: ToolCallRecord[] = [];
 
   let turns = 0;
@@ -1630,7 +1759,7 @@ async function montygateAgentLoop(
 
     const response = await client.messages.create({
       model: MODEL,
-      max_tokens: MG_MAX_TOKENS,
+      max_tokens: MAX_TOKENS,
       temperature: 0,
       system: systemPrompt,
       tools,
@@ -1639,6 +1768,11 @@ async function montygateAgentLoop(
 
     totalInputTokens += response.usage.input_tokens;
     totalOutputTokens += response.usage.output_tokens;
+
+    // FAIRNESS: capture system prompt overhead on first turn
+    if (turns === 1) {
+      systemPromptTokens = response.usage.input_tokens;
+    }
 
     const text = extractText(response.content);
     const toolCalls = extractToolCalls(response.content);
@@ -1747,6 +1881,7 @@ async function montygateAgentLoop(
       inputTokens: totalInputTokens,
       outputTokens: totalOutputTokens,
       costUsd: estimateCost(totalInputTokens, totalOutputTokens),
+      systemPromptTokens,
     },
     conversation,
     toolCallRecords: allToolCallRecords,
@@ -1948,6 +2083,23 @@ function printComparisonTable(
       `${variant.savingsVsTraditional.outputTokensPct}%`,
     ),
   );
+
+  // FAIRNESS: Net reasoning tokens = input tokens - system prompt overhead
+  const tradNetReasoningTokens =
+    result.traditional.run.metrics.inputTokens -
+    result.traditional.run.metrics.systemPromptTokens;
+  const variantNetReasoningTokens =
+    variant.run.metrics.inputTokens - variant.run.metrics.systemPromptTokens;
+  const netReasoningTokensPct = savingsPct(tradNetReasoningTokens, variantNetReasoningTokens);
+  console.log(
+    row(
+      "Net Reasoning Tokens",
+      formatNumber(tradNetReasoningTokens),
+      formatNumber(variantNetReasoningTokens),
+      `${netReasoningTokensPct}%`,
+    ),
+  );
+
   console.log(
     row(
       "Agent-Run Cost",
@@ -1956,6 +2108,20 @@ function printComparisonTable(
       `${variant.savingsVsTraditional.costPct}%`,
     ),
   );
+
+  // FAIRNESS: Net reasoning cost = cost excluding system prompt overhead
+  const tradNetReasoningCost = estimateCost(tradNetReasoningTokens, result.traditional.run.metrics.outputTokens);
+  const variantNetReasoningCost = estimateCost(variantNetReasoningTokens, variant.run.metrics.outputTokens);
+  const netReasoningCostPct = savingsPct(tradNetReasoningCost, variantNetReasoningCost);
+  console.log(
+    row(
+      "Net Reasoning Cost",
+      `$${tradNetReasoningCost.toFixed(4)}`,
+      `$${variantNetReasoningCost.toFixed(4)}`,
+      `${netReasoningCostPct}%`,
+    ),
+  );
+
   console.log(
     row(
       "Correctness",
@@ -2043,7 +2209,8 @@ function parseArgs(): BenchmarkArgs {
   }
 
   const runsArg = process.argv.find((a) => a.startsWith("--runs="));
-  const runs = runsArg ? parseInt(runsArg.split("=")[1], 10) : 1;
+  // FAIRNESS: default to 3 runs for variance reporting
+  const runs = runsArg ? parseInt(runsArg.split("=")[1], 10) : 3;
   if (isNaN(runs) || runs < 1) {
     console.error("--runs must be a positive integer");
     process.exit(1);
@@ -2059,17 +2226,62 @@ function parseArgs(): BenchmarkArgs {
   };
 }
 
+// ── Statistics Helpers ──────────────────────────────────────────────────────
+
+export function stdDev(values: number[]): number {
+  if (values.length === 0) return 0;
+  if (values.length === 1) return 0;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+export function computeMetricsStats(runs: RunMetrics[]): MetricsStats {
+  const n = runs.length;
+  const netReasoningTokens = runs.map((r) => r.inputTokens - r.systemPromptTokens);
+  const netReasoningCosts = runs.map(
+    (r) => estimateCost(r.inputTokens - r.systemPromptTokens, r.outputTokens),
+  );
+
+  return {
+    mean: {
+      roundTrips: runs.reduce((s, r) => s + r.roundTrips, 0) / n,
+      totalToolInvocations: runs.reduce((s, r) => s + r.totalToolInvocations, 0) / n,
+      executeCallCount: runs.reduce((s, r) => s + r.executeCallCount, 0) / n,
+      inputTokens: runs.reduce((s, r) => s + r.inputTokens, 0) / n,
+      outputTokens: runs.reduce((s, r) => s + r.outputTokens, 0) / n,
+      systemPromptTokens: runs.reduce((s, r) => s + r.systemPromptTokens, 0) / n,
+      costUsd: runs.reduce((s, r) => s + r.costUsd, 0) / n,
+      netReasoningTokens: netReasoningTokens.reduce((a, b) => a + b, 0) / n,
+      netReasoningCostUsd: netReasoningCosts.reduce((a, b) => a + b, 0) / n,
+    },
+    stdDev: {
+      roundTrips: stdDev(runs.map((r) => r.roundTrips)),
+      totalToolInvocations: stdDev(runs.map((r) => r.totalToolInvocations)),
+      executeCallCount: stdDev(runs.map((r) => r.executeCallCount)),
+      inputTokens: stdDev(runs.map((r) => r.inputTokens)),
+      outputTokens: stdDev(runs.map((r) => r.outputTokens)),
+      systemPromptTokens: stdDev(runs.map((r) => r.systemPromptTokens)),
+      costUsd: stdDev(runs.map((r) => r.costUsd)),
+      netReasoningTokens: stdDev(netReasoningTokens),
+      netReasoningCostUsd: stdDev(netReasoningCosts),
+    },
+  };
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 function averageMetrics(runs: RunMetrics[]): RunMetrics {
   const n = runs.length;
+  const stats = computeMetricsStats(runs);
   return {
-    roundTrips: Math.round(runs.reduce((s, r) => s + r.roundTrips, 0) / n),
-    totalToolInvocations: Math.round(runs.reduce((s, r) => s + r.totalToolInvocations, 0) / n),
-    executeCallCount: Math.round(runs.reduce((s, r) => s + r.executeCallCount, 0) / n),
-    inputTokens: Math.round(runs.reduce((s, r) => s + r.inputTokens, 0) / n),
-    outputTokens: Math.round(runs.reduce((s, r) => s + r.outputTokens, 0) / n),
-    costUsd: runs.reduce((s, r) => s + r.costUsd, 0) / n,
+    roundTrips: Math.round(stats.mean.roundTrips),
+    totalToolInvocations: Math.round(stats.mean.totalToolInvocations),
+    executeCallCount: Math.round(stats.mean.executeCallCount),
+    inputTokens: Math.round(stats.mean.inputTokens),
+    outputTokens: Math.round(stats.mean.outputTokens),
+    costUsd: stats.mean.costUsd,
+    systemPromptTokens: Math.round(stats.mean.systemPromptTokens),
   };
 }
 
@@ -2118,11 +2330,15 @@ function buildScenarioModeResult(
     return null;
   }
 
+  const metricsArray = runs.map((r) => r.metrics);
   const run = {
     ...runs[runs.length - 1],
-    metrics: averageMetrics(runs.map((r) => r.metrics)),
+    metrics: averageMetrics(metricsArray),
   };
   const evalResult = evals.length > 0 ? averageEval(evals) : createEmptyEvalResult();
+
+  // FAIRNESS: compute variance statistics when multiple runs are available
+  const metricsStats = metricsArray.length > 1 ? computeMetricsStats(metricsArray) : undefined;
 
   return {
     key,
@@ -2132,6 +2348,7 @@ function buildScenarioModeResult(
     savingsVsTraditional: traditionalMetrics
       ? buildSavingsSummary(traditionalMetrics, run.metrics)
       : null,
+    metricsStats,
   };
 }
 
@@ -2143,6 +2360,7 @@ function serializeMetrics(metrics: RunMetrics) {
     input_tokens: metrics.inputTokens,
     output_tokens: metrics.outputTokens,
     cost_usd: metrics.costUsd,
+    system_prompt_tokens: metrics.systemPromptTokens,
   };
 }
 

@@ -4,12 +4,16 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildJudgePrompt,
   buildJsonOutput,
+  computeMetricsStats,
   formatConversationForJudge,
   parseArgs,
   printComparisonTable,
   runScenario,
   scenarios,
+  stdDev,
+  TRADITIONAL_SYSTEM_PROMPT,
 } from "./manual-agent-loop.js";
 
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
@@ -25,6 +29,7 @@ function makeRunResult(
     inputTokens: number;
     outputTokens: number;
     costUsd: number;
+    systemPromptTokens: number;
   }>,
 ) {
   const executeTrace = [
@@ -51,6 +56,7 @@ function makeRunResult(
       inputTokens: overrides?.inputTokens ?? 1200,
       outputTokens: overrides?.outputTokens ?? 400,
       costUsd: overrides?.costUsd ?? 0.0031,
+      systemPromptTokens: overrides?.systemPromptTokens ?? 450,
     },
     conversation: [
       { role: "user" as const, content: `${label} prompt` },
@@ -142,13 +148,13 @@ function makeScenarioResult() {
 }
 
 describe("manual-agent-loop benchmark harness", () => {
-  it("defaults zero-arg runs to traditional vs Montygate", () => {
+  it("defaults zero-arg runs to traditional vs Montygate with 3 runs", () => {
     const originalArgv = process.argv;
 
     try {
       process.argv = ["node", "manual-agent-loop.ts"];
       expect(parseArgs()).toMatchObject({
-        runs: 1,
+        runs: 3,
       });
     } finally {
       process.argv = originalArgv;
@@ -279,6 +285,76 @@ describe("manual-agent-loop benchmark harness", () => {
     expect(transcript).toContain("[EXECUTE TRACE] send_notification");
     expect(transcript).toContain("maya.chen@example.com");
     expect(transcript).toContain("[EXECUTE RESULT - final script return value]");
+  });
+
+  it("judge prompt is mode-neutral and equally values both transcript formats", () => {
+    const prompt = buildJudgePrompt(
+      "Sample transcript",
+      [{ description: "test", criterion: "test criterion" }],
+    );
+
+    // Should NOT prefer execute traces as "ACTUAL" or "primary evidence"
+    expect(prompt).not.toMatch(/ACTUAL tool invocations/);
+    expect(prompt).not.toMatch(/primary evidence/);
+
+    // Should treat both formats as equivalent
+    expect(prompt).toContain("[TOOL CALL]");
+    expect(prompt).toContain("[EXECUTE TRACE]");
+    expect(prompt).toContain("equivalent evidence");
+    expect(prompt).toContain("Do not prefer one form");
+  });
+
+  it("TRADITIONAL_SYSTEM_PROMPT covers key strategic topics", () => {
+    expect(TRADITIONAL_SYSTEM_PROMPT.length).toBeGreaterThan(300);
+    expect(TRADITIONAL_SYSTEM_PROMPT).toContain("parallel");
+    expect(TRADITIONAL_SYSTEM_PROMPT).toContain("round-trip");
+    expect(TRADITIONAL_SYSTEM_PROMPT).toContain("Batch independent calls");
+  });
+
+  it("computes std dev correctly across multiple runs", () => {
+    const runs = [
+      {
+        roundTrips: 2,
+        totalToolInvocations: 5,
+        executeCallCount: 1,
+        inputTokens: 1200,
+        outputTokens: 400,
+        costUsd: 0.0031,
+        systemPromptTokens: 450,
+      },
+      {
+        roundTrips: 3,
+        totalToolInvocations: 5,
+        executeCallCount: 1,
+        inputTokens: 1400,
+        outputTokens: 420,
+        costUsd: 0.0035,
+        systemPromptTokens: 450,
+      },
+      {
+        roundTrips: 2,
+        totalToolInvocations: 5,
+        executeCallCount: 1,
+        inputTokens: 1100,
+        outputTokens: 380,
+        costUsd: 0.0029,
+        systemPromptTokens: 450,
+      },
+    ];
+
+    const stats = computeMetricsStats(runs);
+    expect(stats.stdDev.roundTrips).toBeGreaterThan(0);
+    expect(stats.stdDev.inputTokens).toBeGreaterThan(0);
+    expect(stats.mean.roundTrips).toBeCloseTo(7 / 3, 1);
+    expect(stats.mean.inputTokens).toBeCloseTo(3700 / 3, 0);
+  });
+
+  it("stdDev returns 0 for single value", () => {
+    expect(stdDev([42])).toBe(0);
+  });
+
+  it("stdDev returns 0 for empty array", () => {
+    expect(stdDev([])).toBe(0);
   });
 
   it("serializes the benchmark artifact with one Montygate variant", () => {
