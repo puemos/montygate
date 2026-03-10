@@ -514,15 +514,24 @@ Here is the full conversation transcript:
 ${transcript}
 
 IMPORTANT: Some agents use a sandboxed "execute" tool that runs Python scripts.
-- Tool calls inside those scripts may appear as [EXECUTE TRACE] lines.
-- Use those trace lines as evidence for what happened inside execute().
+- Tool calls inside those scripts appear as [EXECUTE TRACE] lines — these are the ACTUAL tool invocations.
+- Use those trace lines as primary evidence for what happened inside execute().
+- The execute script code also shows the logic (conditionals, loops, filtering).
 - Do NOT assume the final execute return value lists every inner tool outcome.
 
-Evaluate each criterion — was it achieved based on the evidence in the conversation?
+Evaluation rules:
+- Evaluate each criterion INDEPENDENTLY based on concrete evidence in the transcript.
+- For criteria about actions taken: look for [TOOL CALL], [TOOL RESULT], or [EXECUTE TRACE] evidence.
+- For criteria about actions NOT taken (e.g. "no case created"): verify there is NO matching tool call or trace entry. Pass only if there is clear absence of the action.
+- For numeric criteria (amounts, counts): check the actual values in tool call arguments and results.
 ${criteriaList}
 
-Return ONLY a JSON array with no other text: [{"index": 0, "passed": true, "evidence": "brief quote or reason"}, ...]
-Each entry must have "index" (0-based), "passed" (boolean), and "evidence" (string).`;
+Return ONLY valid JSON (no other text, no markdown fences):
+[
+  {"index": 0, "passed": true, "evidence": "brief quote or reason"},
+  {"index": 1, "passed": false, "evidence": "reason why it failed"}
+]
+Each entry must have "index" (0-based number), "passed" (boolean true/false), and "evidence" (string).`;
 }
 
 async function judgeOutcomes(
@@ -562,11 +571,33 @@ async function judgeOutcomes(
     };
   }
 
-  const judgeResults = JSON.parse(jsonMatch[0]) as Array<{
+  let judgeResults: Array<{
     index: number;
     passed: boolean;
     evidence: string;
   }>;
+  try {
+    judgeResults = JSON.parse(jsonMatch[0]) as Array<{
+      index: number;
+      passed: boolean;
+      evidence: string;
+    }>;
+  } catch (e) {
+    console.error("  [judge] Failed to parse JSON:", jsonMatch[0]);
+    console.error("  [judge] Error:", e);
+    return {
+      passed: 0,
+      failed: expectations.length,
+      total: expectations.length,
+      score: 0,
+      results: expectations.map((e) => ({
+        description: e.description,
+        criterion: e.criterion,
+        passed: false,
+        evidence: "Judge JSON parsing failed",
+      })),
+    };
+  }
 
   const results: OutcomeResult[] = expectations.map((e, i) => {
     const jr = judgeResults.find((r) => r.index === i);
@@ -627,7 +658,7 @@ function createAllTools(counters: IdCounters): Record<string, ToolDef> {
       description:
         "Look up order details by order ID. Returns order status, associated customer ID, line items with SKUs and prices, total amount, and tracking info.",
       params: z.object({
-        order_id: z.string().describe("The order ID, e.g. ORD-7291"),
+        order_id: z.string().describe("The order ID, e.g. ORD-1234"),
       }),
       returns: z.object({
         id: z.string(),
@@ -657,7 +688,7 @@ function createAllTools(counters: IdCounters): Record<string, ToolDef> {
       params: z.object({
         customer_id: z
           .string()
-          .describe("Customer ID returned from order lookup, e.g. CUST-8842"),
+          .describe("Customer ID returned from order lookup, e.g. CUST-1001"),
       }),
       returns: z.object({
         id: z.string(),
@@ -866,7 +897,7 @@ function createAllTools(counters: IdCounters): Record<string, ToolDef> {
       params: z.object({
         sku_list: z
           .array(z.string())
-          .describe("List of SKU IDs to check, e.g. ['SKU-W100', 'SKU-C200']"),
+          .describe("List of SKU IDs to check, e.g. ['SKU-A100', 'SKU-B200']"),
       }),
       returns: z.object({
         items: z.array(
@@ -1125,8 +1156,8 @@ const scenarios: ScenarioDef[] = [
     name: "Proactive Churn Prevention",
     prompt:
       "CUST-2244 just returned something and I'm worried they're about to churn. " +
-      "Look at their history, give them 15% store credit on the returned items, " +
-      "and check if those items are back in stock. " +
+      "Look at their history, find the returned order, and give them 15% store credit on that order's total. " +
+      "Also check if the returned items are back in stock. " +
       "Open a retention case, schedule a callback at +1-555-0142, " +
       "and send a win-back email.",
     toolNames: [

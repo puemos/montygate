@@ -335,14 +335,22 @@ impl ToolRegistry {
              \n\
              Each execute() starts fresh — include ALL tool() calls you need in a single script.\n\
              Maximize tool calls per script to reduce round-trips:\n\
-               order = tool('lookup_order', order_id='ORD-123')\n\
-               customer = tool('get_customer', customer_id=order['customer_id'])\n\
-               eligible = tool('check_refund', order_id='ORD-123', tier=customer['tier'])\n\
-               if eligible['approved']:\n\
-                   refund = tool('process_refund', order_id='ORD-123', amount=order['total'])\n\
-               {{'order': order, 'customer': customer, 'refund': refund if eligible['approved'] else None}}\n\
+               repo = tool('get_repo', repo_id='R-42')\n\
+               builds = tool('list_builds', repo_id=repo['id'])\n\
+               latest = [b for b in builds['items'] if b['branch'] == 'main'][0]\n\
+               if latest['status'] == 'failed':\n\
+                   logs = tool('get_build_logs', build_id=latest['id'])\n\
+               {{'repo': repo, 'latest_build': latest, 'logs': logs if latest['status'] == 'failed' else None}}\n\
              \n\
-             For independent parallel calls: batch_tools([('name1', {{...}}), ('name2', {{...}})])"
+             For independent parallel calls, use batch_tools() instead of sequential tool() calls:\n\
+               results = batch_tools([\n\
+                   ('tool_a', {{'param': val_a}}),\n\
+                   ('tool_b', {{'param': val_b}}),\n\
+               ])\n\
+               a_result, b_result = results[0], results[1]\n\
+             \n\
+             Fan-out pattern — run the same tool on multiple inputs:\n\
+               records = batch_tools([('fetch_item', {{'id': id}}) for id in id_list])"
         )
     }
 
@@ -369,32 +377,35 @@ impl ToolRegistry {
          - Use loops for repeated operations, conditionals for branching logic\n\
          - Filter lists by field values — never assume ordering\n\
          - Return a single result dict summarizing everything done\n\
-         - For independent parallel calls: batch_tools([('name1', {args}), ('name2', {args})])\n\
+         - For independent parallel calls, use batch_tools() instead of sequential tool() calls:\n\
+             results = batch_tools([('tool_a', {args_a}), ('tool_b', {args_b})])\n\
+             a_result, b_result = results[0], results[1]\n\
+           Fan-out: batch_tools([('same_tool', {'id': x}) for x in ids])\n\
          \n\
          Never call execute() to \"gather information first\" — gather and act in one script.\n\
          \n\
          COMMON MISTAKES (avoid these):\n\
-         - WRONG: days = tool('days_since', ...); if days > 14\n\
-           RIGHT: result = tool('days_since', ...); if result['days'] > 14\n\
+         - WRONG: count = tool('get_count', ...); if count > 10\n\
+           RIGHT: result = tool('get_count', ...); if result['count'] > 10\n\
            (tool() usually returns a dict — check the return signature (→ {...}) and access fields by key)\n\
          - WRONG: item = items[0]  # assumes first element is the one you want\n\
-           RIGHT: item = [i for i in items if i['status'] == 'returned'][0]\n\
+           RIGHT: item = [i for i in items if i['type'] == 'invoice'][0]\n\
            (filter by field values instead of assuming list ordering)\n\
          - WRONG: calling execute() once to gather data, then again to act on it\n\
            RIGHT: gather data AND act on it in a single execute() script\n\
          \n\
          Example — handling a complete workflow in one script:\n\
          \n\
-           history = tool('get_order_history', customer_id='CUST-123')\n\
-           qualifying = [o for o in history['orders'] if o['total'] > 50 and o['status'] == 'shipped']\n\
+           tickets = tool('list_tickets', project_id='PRJ-10')\n\
+           open_tickets = [t for t in tickets['items'] if t['priority'] == 'high' and t['status'] == 'open']\n\
            results = []\n\
-           for o in qualifying:\n\
-               detail = tool('lookup_order', order_id=o['id'])\n\
-               refund = tool('process_refund', order_id=o['id'], amount=detail['total'], policy_id='POL-100')\n\
-               results.append({'order': o['id'], 'refund_id': refund['refund_id']})\n\
-           tool('send_notification', channel='email', recipient='user@example.com',\n\
-                subject='Refunds processed', body=f'{len(results)} refunds completed')\n\
-           {'processed': results, 'count': len(results)}"
+           for t in open_tickets:\n\
+               detail = tool('get_ticket', ticket_id=t['id'])\n\
+               updated = tool('assign_ticket', ticket_id=t['id'], assignee=detail['default_owner'])\n\
+               results.append({'ticket': t['id'], 'assignee': updated['assignee']})\n\
+           tool('send_message', channel='slack', target='#ops',\n\
+                text=f'{len(results)} tickets assigned')\n\
+           {'assigned': results, 'count': len(results)}"
             .to_string()
     }
 
