@@ -31,12 +31,14 @@ export declare class NativeEngine {
   search(query: string, topK?: number | undefined | null): Array<NapiSearchResult>
   /** Get a formatted catalog of all registered tools (for LLM descriptions). */
   getToolCatalog(): string
+  /** Get compact tool signatures: `name(param1, param2) -> {field1, field2}`. */
+  getToolSignatures(): string
+  /** Get the recommended system prompt for LLM conversations. */
+  getSystemPrompt(): string
   /** Get the canonical "execute" tool description for LLM adapters. */
   getExecuteToolDescription(): string
   /** Get the canonical "search" tool description for LLM adapters. */
   getSearchToolDescription(): string
-  /** Get the canonical system prompt for guiding LLMs. */
-  getSystemPrompt(): string
   /** Get the canonical JSON Schema for the execute tool's input parameters. */
   getExecuteToolInputSchema(): any
   /** Get the canonical JSON Schema for the search tool's input parameters. */

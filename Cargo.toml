@@ -49,7 +49,7 @@ parking_lot = "0.12"
 governor = "0.8"
 
 # Python execution engine (sandboxed interpreter)
-monty = { git = "https://github.com/pydantic/monty", tag = "v0.0.4" }
+monty = { git = "https://github.com/pydantic/monty", tag = "v0.0.7" }
 
 [profile.release]
 opt-level = 3

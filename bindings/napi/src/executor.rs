@@ -61,6 +61,9 @@ impl ToolDispatcher for NapiDispatcher {
             }
         })?;
 
+        // Validate kwargs against the tool's input_schema before calling JS
+        self.registry.validate_tool_args(tool_name, &args)?;
+
         let tsfn = tsfn.value().clone();
         let tool_name_owned = tool_name.to_string();
         let tool_name_for_closure = tool_name_owned.clone();
@@ -257,6 +260,18 @@ impl NativeEngine {
         self.registry.tool_catalog()
     }
 
+    /// Get compact tool signatures: `name(param1, param2) -> {field1, field2}`.
+    #[napi]
+    pub fn get_tool_signatures(&self) -> String {
+        self.registry.tool_signatures()
+    }
+
+    /// Get the recommended system prompt for LLM conversations.
+    #[napi]
+    pub fn get_system_prompt(&self) -> String {
+        self.registry.system_prompt()
+    }
+
     /// Get the canonical "execute" tool description for LLM adapters.
     #[napi]
     pub fn get_execute_tool_description(&self) -> String {
@@ -267,12 +282,6 @@ impl NativeEngine {
     #[napi]
     pub fn get_search_tool_description(&self) -> String {
         self.registry.search_tool_description()
-    }
-
-    /// Get the canonical system prompt for guiding LLMs.
-    #[napi]
-    pub fn get_system_prompt(&self) -> String {
-        self.registry.system_prompt()
     }
 
     /// Get the canonical JSON Schema for the execute tool's input parameters.

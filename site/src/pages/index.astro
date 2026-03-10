@@ -1,0 +1,270 @@
+---
+import "../styles/global.css";
+import { Code } from "astro:components";
+import ConversationFlow from "../components/ConversationFlow.astro";
+import MetricsRow from "../components/MetricsRow.astro";
+import { normalizeBenchmarkData } from "../lib/benchmark";
+
+import data from "../../../packages/node/benchmark-results.json";
+
+const { scenarios, availableModes, defaultMode, tableRows } =
+  normalizeBenchmarkData(data);
+
+const pythonSnippet = `order = tool('lookup_order', order_id='ORD-7291')
+customer = tool('get_customer', customer_id=order['customer_id'])
+eligibility = tool('check_refund_eligibility',
+    order_id='ORD-7291', customer_tier=customer['tier'])
+refund = tool('process_refund',
+    amount=order['total'] * (eligibility['max_refund_pct'] / 100),
+    order_id='ORD-7291', policy_id=eligibility['policy_id'])
+tool('send_notification', channel='email',
+    recipient=customer['email'],
+    subject='Refund Processed',
+    body='Refund ' + refund['refund_id'] + ' confirmed.')`;
+
+const tsSnippet = `import { Montygate } from "montygate";
+
+const gate = new Montygate({ tools: myTools, handlers });
+
+const response = await client.messages.create({
+  tools: gate.anthropic(),
+  messages,
+});`;
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Montygate</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <!-- A. Header -->
+    <header>
+      <h1>Montygate</h1>
+      <p class="tagline">N tool calls. One round-trip.</p>
+    </header>
+
+    <!-- B. The Problem -->
+    <section class="problem">
+      <h2>Every tool call is a round-trip.</h2>
+      <p>
+        LLM asks for tool A, waits for the result, uses it to ask for tool B,
+        waits again. Wire up five tools and a simple workflow becomes five
+        sequential calls &mdash; each one re-sending the entire conversation,
+        burning tokens and latency.
+      </p>
+    </section>
+
+    <!-- C. Conversation Comparison -->
+    <section class="hero">
+      <h2>What this looks like</h2>
+
+      {availableModes.length > 0 && (
+        <div class="mode-tabs" role="tablist" aria-label="Montygate mode">
+          {availableModes.map((mode) => (
+            <button
+              class={`mode-tab ${mode.key === defaultMode ? "active" : ""}`}
+              role="tab"
+              aria-selected={mode.key === defaultMode ? "true" : "false"}
+              data-mode-tab={mode.key}
+            >
+              {mode.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div class="scenario-tabs" role="tablist">
+        {scenarios.map((s, i) => (
+          <button
+            class={`scenario-tab ${i === 0 ? "active" : ""}`}
+            role="tab"
+            aria-selected={i === 0 ? "true" : "false"}
+            data-tab={i}
+          >
+            {s.name}
+            <span class="scenario-tab-tools">{s.tools} tools</span>
+          </button>
+        ))}
+      </div>
+
+      {scenarios.map((s, i) => (
+        <div class={`scenario-panel ${i === 0 ? "active" : ""}`} data-panel={i} role="tabpanel">
+          <div class="comparison-grid">
+            <ConversationFlow
+              title="Traditional"
+              conversation={s.traditional?.conversation ?? []}
+            />
+            {availableModes.map((mode) => {
+              const variant = s[mode.key];
+              if (!variant) return null;
+              return (
+                <div
+                  class={`mode-pane ${mode.key === defaultMode ? "active" : ""}`}
+                  data-mode-pane={mode.key}
+                >
+                  <ConversationFlow
+                    title={`Montygate ${variant.label}`}
+                    conversation={variant.conversation}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          {availableModes.map((mode) => {
+            const variant = s[mode.key];
+            if (!variant?.savingsVsTraditional) return null;
+            return (
+              <div
+                class={`mode-metrics ${mode.key === defaultMode ? "active" : ""}`}
+                data-mode-metrics={mode.key}
+              >
+                <MetricsRow
+                  metrics={[
+                    {
+                      value: `${variant.savingsVsTraditional.round_trips_pct}%`,
+                      label: "fewer round-trips",
+                    },
+                    {
+                      value: `${variant.savingsVsTraditional.input_tokens_pct}%`,
+                      label: "fewer tokens",
+                    },
+                    {
+                      value: `${variant.savingsVsTraditional.cost_pct}%`,
+                      label: "lower agent cost",
+                    },
+                    {
+                      value: `${variant.eval.passed}/${variant.eval.total}`,
+                      label: "eval score",
+                    },
+                  ]}
+                />
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </section>
+
+    <!-- E. How It Works -->
+    <section>
+      <h2>One script, five tools</h2>
+      <Code code={pythonSnippet} lang="python" theme="github-light" />
+      <p class="code-caption">
+        The LLM writes this. Montygate runs it in a sandbox.
+      </p>
+    </section>
+
+    <!-- F. All Benchmarks -->
+    <section>
+      <h2>Across {data.scenarios.length} scenarios</h2>
+      <table class="benchmark-table">
+        <thead>
+          <tr>
+            <th>Scenario</th>
+            <th>Mode</th>
+            <th>Tools</th>
+            <th>Round-trips</th>
+            <th>Tokens</th>
+            <th>Agent Cost</th>
+            <th>Eval</th>
+          </tr>
+        </thead>
+        <tbody>
+          {tableRows.map((row) => (
+            <tr>
+              <td class="scenario-name">{row.scenario}</td>
+              <td>{row.mode}</td>
+              <td>{row.tools}</td>
+              <td class={row.savings.round_trips_pct >= 0 ? "positive" : "negative"}>
+                {row.savings.round_trips_pct >= 0 ? "-" : "+"}{Math.abs(row.savings.round_trips_pct)}%
+              </td>
+              <td class={row.savings.input_tokens_pct >= 0 ? "positive" : "negative"}>
+                {row.savings.input_tokens_pct >= 0 ? "-" : "+"}{Math.abs(row.savings.input_tokens_pct)}%
+              </td>
+              <td class={row.savings.cost_pct >= 0 ? "positive" : "negative"}>
+                {row.savings.cost_pct >= 0 ? "-" : "+"}{Math.abs(row.savings.cost_pct)}%
+              </td>
+              <td>
+                <span class={`eval-score ${row.eval.score === 1 ? "eval-pass" : row.eval.score >= 0.5 ? "eval-partial" : "eval-fail"}`}>
+                  {row.eval.passed}/{row.eval.total}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p class="footnote">
+        Benchmarked with Claude Haiku 4.5. Cost figures are agent-run cost only and exclude LLM-as-judge usage.
+      </p>
+    </section>
+
+    <!-- G. Get Started -->
+    <section class="get-started">
+      <h2>Get started</h2>
+      <Code code="npm install montygate" lang="bash" theme="github-light" />
+      <Code code={tsSnippet} lang="typescript" theme="github-light" />
+      <p>
+        <a href="https://github.com/puemos/montygate">View on GitHub</a>
+      </p>
+    </section>
+
+    <!-- H. Footer -->
+    <footer>
+      <span>MIT / Apache-2.0</span>
+      <a href="https://github.com/puemos/montygate">GitHub</a>
+    </footer>
+
+    <script>
+      // Expand/collapse flow items
+      document.querySelectorAll('.flow-item.expandable .flow-header').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const item = btn.closest('.flow-item')!;
+          const isOpen = item.classList.toggle('open');
+          btn.setAttribute('aria-expanded', String(isOpen));
+        });
+      });
+
+      // Scenario tab switching
+      document.querySelectorAll('.scenario-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          const idx = (tab as HTMLElement).dataset.tab;
+          // Update tabs
+          document.querySelectorAll('.scenario-tab').forEach(t => {
+            const active = (t as HTMLElement).dataset.tab === idx;
+            t.classList.toggle('active', active);
+            t.setAttribute('aria-selected', String(active));
+          });
+          // Update panels
+          document.querySelectorAll('.scenario-panel').forEach(p => {
+            (p as HTMLElement).classList.toggle('active', (p as HTMLElement).dataset.panel === idx);
+          });
+        });
+      });
+
+      document.querySelectorAll('[data-mode-tab]').forEach(tab => {
+        tab.addEventListener('click', () => {
+          const mode = (tab as HTMLElement).dataset.modeTab;
+          document.querySelectorAll('[data-mode-tab]').forEach(t => {
+            const active = (t as HTMLElement).dataset.modeTab === mode;
+            t.classList.toggle('active', active);
+            t.setAttribute('aria-selected', String(active));
+          });
+          document.querySelectorAll('[data-mode-pane]').forEach(p => {
+            (p as HTMLElement).classList.toggle('active', (p as HTMLElement).dataset.modePane === mode);
+          });
+          document.querySelectorAll('[data-mode-metrics]').forEach(p => {
+            (p as HTMLElement).classList.toggle('active', (p as HTMLElement).dataset.modeMetrics === mode);
+          });
+        });
+      });
+    </script>
+  </body>
+</html>

@@ -1,5 +1,5 @@
-use crate::MontygateError;
 use crate::types::{Result, ToolDefinition};
+use crate::MontygateError;
 use dashmap::DashMap;
 use regex::Regex;
 use std::sync::Arc;
@@ -125,6 +125,61 @@ impl ToolRegistry {
         scored.into_iter().map(|(name, _)| name).collect()
     }
 
+    /// Validate that the provided kwargs keys match the tool's input_schema properties.
+    ///
+    /// Returns `Ok(())` if all keys are valid, or an error describing which keys
+    /// are unexpected and what the expected parameters are.  This catches wrong
+    /// parameter names (e.g. `id=` instead of `customer_id=`) **before** the JS
+    /// handler runs, preventing cascading failures from `undefined` values.
+    pub fn validate_tool_args(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<()> {
+        let tool = match self.tools.get(tool_name) {
+            Some(entry) => entry.clone(),
+            None => return Ok(()), // tool-not-found is handled elsewhere
+        };
+
+        let arg_keys: Vec<&str> = match args.as_object() {
+            Some(map) => map.keys().map(|k| k.as_str()).collect(),
+            None => return Ok(()), // non-object args (e.g. empty {}) are fine
+        };
+
+        if arg_keys.is_empty() {
+            return Ok(());
+        }
+
+        let schema_props: Vec<String> = tool
+            .input_schema
+            .as_object()
+            .and_then(|o| o.get("properties"))
+            .and_then(|p| p.as_object())
+            .map(|props| props.keys().cloned().collect())
+            .unwrap_or_default();
+
+        if schema_props.is_empty() {
+            return Ok(()); // no schema to validate against
+        }
+
+        let unknown_keys: Vec<&str> = arg_keys
+            .iter()
+            .filter(|k| !schema_props.iter().any(|p| p == *k))
+            .copied()
+            .collect();
+
+        if unknown_keys.is_empty() {
+            return Ok(());
+        }
+
+        Err(MontygateError::Validation(format!(
+            "{} does not accept parameter(s): {}. Expected: {}",
+            tool_name,
+            unknown_keys.join(", "),
+            schema_props.join(", "),
+        )))
+    }
+
     /// Build a tool catalog string for inclusion in execute tool description
     pub fn tool_catalog(&self) -> String {
         let mut catalog = String::new();
@@ -169,55 +224,183 @@ impl ToolRegistry {
         catalog
     }
 
+    /// Return a comma-separated list of registered tool names.
+    pub fn tool_names(&self) -> String {
+        let mut names: Vec<String> = self.tools.iter().map(|e| e.key().clone()).collect();
+        names.sort();
+        names.join(", ")
+    }
+
+    /// Build compact tool signatures: `name(param1, param2) - Description -> {field1, field2}`
+    ///
+    /// Includes parameter names (no types) and the tool description.  Output
+    /// field names are appended when an output_schema is provided.  This gives
+    /// the LLM enough context to write correct scripts without the token cost
+    /// of full type annotations or the full catalog.
+    pub fn tool_signatures(&self) -> String {
+        let mut sigs = String::new();
+        let mut tools: Vec<ToolDefinition> = self.all_tools();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+
+        for tool in tools {
+            sigs.push_str(&format!("- {}(", tool.name));
+
+            if let Some(props) = tool
+                .input_schema
+                .as_object()
+                .and_then(|o| o.get("properties"))
+                .and_then(|p| p.as_object())
+            {
+                let param_names: Vec<&String> = props.keys().collect();
+                sigs.push_str(
+                    &param_names
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+
+            sigs.push(')');
+
+            if let Some(desc) = &tool.description {
+                sigs.push_str(&format!(" - {}", desc));
+            }
+
+            if let Some(output_schema) = &tool.output_schema {
+                let formatted = format_signature_output(output_schema);
+                if !formatted.is_empty() {
+                    sigs.push_str(&format!(" -> {{{}}}", formatted));
+                }
+            }
+
+            sigs.push('\n');
+        }
+        sigs
+    }
+
+    /// Maximum number of tools to include as compact signatures in the execute
+    /// tool description.  Above this threshold the description switches to a
+    /// names-only listing and relies on the search tool for discovery.
+    ///
+    /// The default of 20 is based on RAG-MCP (arXiv 2505.03275) which shows
+    /// tool-selection accuracy stays high with small sets but degrades in the
+    /// 30-70 range.  Switching at 20 provides headroom before degradation.
+    pub const SIGNATURE_THRESHOLD: usize = 20;
+
     /// Build the canonical description for the "execute" tool exposed to LLMs.
     /// This ensures all SDKs (Node, Python, etc.) present the same instructions.
+    ///
+    /// When the registry contains ≤ [`Self::SIGNATURE_THRESHOLD`] tools, compact
+    /// signatures (parameter + output field names) are inlined so the LLM can
+    /// write correct scripts without an extra search round-trip.
+    ///
+    /// Above the threshold, only tool names are listed and the LLM is directed
+    /// to use the search tool — avoiding the prompt-bloat degradation documented
+    /// in RAG-MCP and ToolScan (arXiv 2411.13547).
     pub fn execute_tool_description(&self) -> String {
-        let catalog = self.tool_catalog();
+        let tool_count = self.tool_count();
+        let tool_listing = if tool_count <= Self::SIGNATURE_THRESHOLD {
+            format!(
+                "Available tools:\n{}\
+                 Use the separate search tool only when a needed signature or return shape is unclear.",
+                self.tool_signatures(),
+            )
+        } else {
+            format!(
+                "Available tools ({tool_count} total): {}\n\
+                 Use the separate search tool to look up tool signatures before writing scripts.",
+                self.tool_names(),
+            )
+        };
+
         format!(
-            "Execute a Python script with access to these tools:\n\
-             {catalog}\n\
-             IMPORTANT: Each execute() runs in a FRESH sandbox — variables do NOT persist between calls.\n\
-             Do ALL related work (lookups, transformations, actions) in a SINGLE script.\n\
+            "Execute a Python script in a sandboxed environment.\n\
+             Use execute when you need to chain multiple tools, use control flow (loops,\n\
+             conditionals), or transform data. For simple single-tool operations, prefer\n\
+             calling the tool directly.\n\
              \n\
-             Call tools with: tool('name', key=value)\n\
-             The LAST EXPRESSION is the return value. Do NOT use print() — it returns None.\n\
+             IMPORTANT RULES:\n\
+             - Call tools ONLY via: result = tool('name', key=value)\n\
+               Direct function calls like name() will fail with NameError.\n\
+             - tool() typically returns a dict. Check the tool's return signature (→ {{...}}) and access fields by key: result = tool(...); value = result['field']\n\
+             - The LAST EXPRESSION is the return value. Do NOT use print().\n\
+             - No imports allowed. No standard library — json, re, math, datetime, collections, itertools, functools, sys, os, io etc. are NOT available. Use plain dicts, lists, and builtins instead.\n\
+             - You CAN define helper functions and dataclasses. No other class types.\n\
+             - sorted() and .sort() do NOT support key= or reverse= and cannot sort tuples. Only sort flat lists of numbers or strings. For custom sort order, build the list manually.\n\
+             - Chained subscript assignment x[a][b] = val is NOT supported. Instead: inner = x[a]; inner[b] = val; x[a] = inner\n\
+             - Set operators (|, &, -, ^) are not supported — use set.update(), set.add(), or loop.\n\
              \n\
-             Parallel dispatch: use batch_tools() only when calls are INDEPENDENT (no data flow between them).\n\
-             results = batch_tools([('tool_a', {{'x': 1}}), ('tool_b', {{'y': 2}})])\n\
-             Do NOT use batch_tools() when tool B needs output from tool A — use sequential tool() calls instead.\n\
+             {tool_listing}\n\
              \n\
-             Runtime restrictions:\n\
-             - No standard library (no json, re, math, datetime, collections, itertools, etc.) — use builtins and plain dicts/lists\n\
-             - No class definitions\n\
-             - sorted() and .sort() do not support key= or reverse= — sort flat lists only\n\
-             - No chained subscript assignment (x[a][b] = val) — use: inner = x[a]; inner[b] = val; x[a] = inner\n\
+             Each execute() starts fresh — include ALL tool() calls you need in a single script.\n\
+             Maximize tool calls per script to reduce round-trips:\n\
+               order = tool('lookup_order', order_id='ORD-123')\n\
+               customer = tool('get_customer', customer_id=order['customer_id'])\n\
+               eligible = tool('check_refund', order_id='ORD-123', tier=customer['tier'])\n\
+               if eligible['approved']:\n\
+                   refund = tool('process_refund', order_id='ORD-123', amount=order['total'])\n\
+               {{'order': order, 'customer': customer, 'refund': refund if eligible['approved'] else None}}\n\
              \n\
-             Example — all work in ONE script (variables are lost between calls):\n\
-             order = tool('lookup_order', order_id='123')\n\
-             ticket = tool('create_ticket', subject='Issue ' + order['id'])\n\
-             {{'order': order, 'ticket': ticket}}"
+             For independent parallel calls: batch_tools([('name1', {{...}}), ('name2', {{...}})])"
         )
+    }
+
+    /// Return the recommended system prompt for LLM conversations.
+    ///
+    /// This is strategic guidance — HOW to use the sandbox effectively.
+    /// Separate from the tool description (WHAT the tool does / syntax rules).
+    /// Designed to be prepended or appended to the developer's own system prompt.
+    pub fn system_prompt(&self) -> String {
+        "You have individual tools AND a sandboxed Python environment (execute).\n\
+         \n\
+         Choose the right approach for each task:\n\
+         - For simple single-tool operations → call the tool directly.\n\
+         - For multi-step chains, loops, conditionals, or data transformations → use execute.\n\
+         \n\
+         When using execute, write ONE comprehensive script that handles the ENTIRE task\n\
+         end-to-end. NEVER split work across multiple execute() calls — there is NO shared\n\
+         state between them. Each extra call re-sends the entire conversation, multiplying\n\
+         token cost. Gather data AND act on it in the same script.\n\
+         \n\
+         Inside execute scripts:\n\
+         - tool() typically returns a dict — check the return signature and access fields by key, e.g. result['field']\n\
+         - Chain calls: use the return value of tool('a', ...) as input to tool('b', ...)\n\
+         - Use loops for repeated operations, conditionals for branching logic\n\
+         - Filter lists by field values — never assume ordering\n\
+         - Return a single result dict summarizing everything done\n\
+         - For independent parallel calls: batch_tools([('name1', {args}), ('name2', {args})])\n\
+         \n\
+         Never call execute() to \"gather information first\" — gather and act in one script.\n\
+         \n\
+         COMMON MISTAKES (avoid these):\n\
+         - WRONG: days = tool('days_since', ...); if days > 14\n\
+           RIGHT: result = tool('days_since', ...); if result['days'] > 14\n\
+           (tool() usually returns a dict — check the return signature (→ {...}) and access fields by key)\n\
+         - WRONG: item = items[0]  # assumes first element is the one you want\n\
+           RIGHT: item = [i for i in items if i['status'] == 'returned'][0]\n\
+           (filter by field values instead of assuming list ordering)\n\
+         - WRONG: calling execute() once to gather data, then again to act on it\n\
+           RIGHT: gather data AND act on it in a single execute() script\n\
+         \n\
+         Example — handling a complete workflow in one script:\n\
+         \n\
+           history = tool('get_order_history', customer_id='CUST-123')\n\
+           qualifying = [o for o in history['orders'] if o['total'] > 50 and o['status'] == 'shipped']\n\
+           results = []\n\
+           for o in qualifying:\n\
+               detail = tool('lookup_order', order_id=o['id'])\n\
+               refund = tool('process_refund', order_id=o['id'], amount=detail['total'], policy_id='POL-100')\n\
+               results.append({'order': o['id'], 'refund_id': refund['refund_id']})\n\
+           tool('send_notification', channel='email', recipient='user@example.com',\n\
+                subject='Refunds processed', body=f'{len(results)} refunds completed')\n\
+           {'processed': results, 'count': len(results)}"
+            .to_string()
     }
 
     /// Build the canonical description for the "search" tool exposed to LLMs.
     pub fn search_tool_description(&self) -> String {
-        "Search for available tools by keyword".to_string()
-    }
-
-    /// Return the canonical system prompt that guides LLMs toward efficient
-    /// single-script usage.  All SDKs (Node, Python, …) should use this so the
-    /// instructions stay in sync.
-    pub fn system_prompt(&self) -> String {
-        "You have access to an `execute` tool that runs a Python script in a sandboxed environment.\n\
-         CRITICAL: Each execute() call runs in a FRESH sandbox. Variables do NOT persist between calls.\n\
-         Always do ALL related work — lookups, transformations, and actions — in a SINGLE script.\n\
-         Use `batch_tools()` only for INDEPENDENT calls that do not rely on each other's outputs.\n\
-         The LAST EXPRESSION in the script is the return value. Do NOT use print().\n\
-         When a tool returns a dict, check the tool catalog for exact field names (e.g. `ticket_id` not `id`).\n\
-         GOOD: order = tool('lookup_order', order_id='123'); ticket = tool('create_ticket', subject='Late ' + order['id']); {'order': order, 'ticket': ticket}\n\
-         BAD: first call execute() with order = tool(...), then later call execute() with ticket = tool(... order['id'] ...).\n\
-         The BAD pattern fails with NameError because the second execute() cannot see variables from the first."
-            .to_string()
+        "Search for available tools by keyword. Use this separate tool only when the execute description does not already give you the exact signature you need.".to_string()
     }
 
     /// Return the canonical JSON Schema for the `execute` tool's input parameters.
@@ -229,10 +412,6 @@ impl ToolRegistry {
                 "code": {
                     "type": "string",
                     "description": "Python script to execute"
-                },
-                "inputs": {
-                    "type": "object",
-                    "description": "Variables to inject into the script"
                 }
             },
             "required": ["code"]
@@ -294,6 +473,76 @@ fn format_parameter(name: &str, schema: &serde_json::Value, required: bool) -> S
 }
 
 /// Format a JSON Schema output_schema as a compact `{key: type, ...}` string for the catalog.
+/// Format an output schema for compact tool signatures.
+///
+/// Shows field names with one level of nesting so the LLM knows the exact
+/// keys to use.  Examples:
+///   `{id, name, email}` — flat object
+///   `{items: [{sku, available, warehouse}]}` — array of objects
+/// Extract field names from an output schema for compact signature display.
+///
+/// Recursion is capped at depth 1 to keep signatures short:
+/// - depth 0: expand object fields, recurse into nested objects/arrays
+/// - depth 1+: just field names, no further nesting
+fn format_signature_output(schema: &serde_json::Value) -> String {
+    format_sig_fields(schema, 0)
+}
+
+fn format_sig_fields(schema: &serde_json::Value, depth: usize) -> String {
+    match schema.get("type").and_then(|t| t.as_str()) {
+        Some("object") => {
+            if let Some(props) = schema
+                .as_object()
+                .and_then(|o| o.get("properties"))
+                .and_then(|p| p.as_object())
+            {
+                let fields: Vec<String> = props
+                    .iter()
+                    .map(|(name, field_schema)| {
+                        if depth < 1 {
+                            let nested = format_sig_fields(field_schema, depth + 1);
+                            if nested.is_empty() {
+                                name.clone()
+                            } else {
+                                format!("{}: {}", name, nested)
+                            }
+                        } else {
+                            name.clone()
+                        }
+                    })
+                    .collect();
+                if fields.is_empty() {
+                    String::new()
+                } else {
+                    let joined = fields.join(", ");
+                    // Nested objects get wrapped in {}; top-level wrapping
+                    // is done by the caller in tool_signatures()
+                    if depth > 0 {
+                        format!("{{{}}}", joined)
+                    } else {
+                        joined
+                    }
+                }
+            } else {
+                String::new()
+            }
+        }
+        Some("array") => {
+            if let Some(items) = schema.get("items") {
+                let inner = format_sig_fields(items, depth);
+                if inner.is_empty() {
+                    String::new()
+                } else {
+                    format!("[{}]", inner)
+                }
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    }
+}
+
 fn format_output_schema(schema: &serde_json::Value) -> String {
     format_schema_type(schema)
 }
@@ -974,36 +1223,6 @@ mod tests {
         assert!(!catalog.contains("->"));
     }
 
-    #[test]
-    fn test_execute_description_mentions_batch_independence() {
-        let registry = ToolRegistry::new();
-        let description = registry.execute_tool_description();
-        assert!(description.contains("INDEPENDENT"));
-        assert!(description.contains("Do NOT use batch_tools()"));
-    }
-
-    // === system_prompt ===
-
-    #[test]
-    fn test_system_prompt_contains_key_instructions() {
-        let registry = ToolRegistry::new();
-        let prompt = registry.system_prompt();
-        assert!(prompt.contains("FRESH sandbox"));
-        assert!(prompt.contains("SINGLE script"));
-        assert!(prompt.contains("batch_tools()"));
-        assert!(prompt.contains("LAST EXPRESSION"));
-        assert!(prompt.contains("Do NOT use print()"));
-        assert!(prompt.contains("NameError"));
-    }
-
-    #[test]
-    fn test_system_prompt_includes_good_and_bad_examples() {
-        let registry = ToolRegistry::new();
-        let prompt = registry.system_prompt();
-        assert!(prompt.contains("GOOD:"));
-        assert!(prompt.contains("BAD:"));
-    }
-
     // === execute_tool_input_schema ===
 
     #[test]
@@ -1015,10 +1234,9 @@ mod tests {
 
         let props = schema["properties"].as_object().unwrap();
         assert!(props.contains_key("code"));
-        assert!(props.contains_key("inputs"));
+        assert!(!props.contains_key("inputs"));
 
         assert_eq!(props["code"]["type"], "string");
-        assert_eq!(props["inputs"]["type"], "object");
 
         let required = schema["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);
@@ -1031,8 +1249,10 @@ mod tests {
         let schema = registry.execute_tool_input_schema();
         let props = schema["properties"].as_object().unwrap();
 
-        assert!(props["code"]["description"].as_str().unwrap().contains("Python"));
-        assert!(props["inputs"]["description"].as_str().unwrap().contains("Variables"));
+        assert!(props["code"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Python"));
     }
 
     // === search_tool_input_schema ===
@@ -1069,25 +1289,291 @@ mod tests {
         assert!(!required.contains(&"top_k"));
     }
 
-    // === execute_tool_description embeds catalog ===
+    // === tool_names ===
 
     #[test]
-    fn test_execute_description_embeds_tool_catalog() {
+    fn test_tool_names_lists_registered_tools() {
         let registry = ToolRegistry::new();
         registry
-            .register_tool(create_test_tool("my_tool", "Does something"))
+            .register_tools(vec![
+                create_test_tool("beta_tool", "Beta"),
+                create_test_tool("alpha_tool", "Alpha"),
+            ])
             .unwrap();
-        let desc = registry.execute_tool_description();
-        assert!(desc.contains("my_tool("));
-        assert!(desc.contains("Does something"));
+        let names = registry.tool_names();
+        assert_eq!(names, "alpha_tool, beta_tool");
     }
 
     #[test]
-    fn test_execute_description_mentions_runtime_restrictions() {
+    fn test_tool_names_empty_registry() {
         let registry = ToolRegistry::new();
+        assert_eq!(registry.tool_names(), "");
+    }
+
+    // === tool_signatures ===
+
+    #[test]
+    fn test_tool_signatures_include_description() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "lookup_order".to_string(),
+                description: Some("Look up order details by ID".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "order_id": { "type": "string", "description": "The order ID" }
+                    },
+                    "required": ["order_id"]
+                }),
+                output_schema: None,
+            })
+            .unwrap();
+        let sigs = registry.tool_signatures();
+        // Contains param name and description but not types or param descriptions
+        assert!(sigs.contains("lookup_order(order_id) - Look up order details by ID"));
+        assert!(!sigs.contains("string"));
+        assert!(!sigs.contains("The order ID"));
+    }
+
+    #[test]
+    fn test_tool_signatures_with_output_schema() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "get_customer".to_string(),
+                description: Some("Get customer profile".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "customer_id": { "type": "string" }
+                    },
+                    "required": ["customer_id"]
+                }),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" },
+                        "tier": { "type": "string" }
+                    }
+                })),
+            })
+            .unwrap();
+        let sigs = registry.tool_signatures();
+        // serde_json sorts keys alphabetically; output uses {field, field} syntax
+        assert!(sigs.contains(
+            "get_customer(customer_id) - Get customer profile -> {email, name, tier}"
+        ));
+    }
+
+    #[test]
+    fn test_tool_signatures_nested_output_schema() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "check_inventory".to_string(),
+                description: Some("Check inventory".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "sku_list": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "sku": { "type": "string" },
+                                    "available": { "type": "number" },
+                                    "warehouse": { "type": "string" }
+                                }
+                            }
+                        }
+                    }
+                })),
+            })
+            .unwrap();
+        let sigs = registry.tool_signatures();
+        // Nested objects show field names inside array brackets
+        assert!(sigs.contains(
+            "check_inventory(sku_list) - Check inventory -> {items: [{available, sku, warehouse}]}"
+        ));
+    }
+
+    #[test]
+    fn test_tool_signatures_sorted() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tools(vec![
+                create_test_tool("zebra", "Z"),
+                create_test_tool("alpha", "A"),
+            ])
+            .unwrap();
+        let sigs = registry.tool_signatures();
+        let alpha_pos = sigs.find("alpha").unwrap();
+        let zebra_pos = sigs.find("zebra").unwrap();
+        assert!(alpha_pos < zebra_pos);
+    }
+
+    // === execute_tool_description — threshold behavior ===
+
+    #[test]
+    fn test_execute_description_uses_signatures_below_threshold() {
+        let registry = ToolRegistry::new();
+        // Register a few tools (below threshold)
+        for i in 0..5 {
+            registry
+                .register_tool(create_test_tool(
+                    &format!("tool_{}", i),
+                    &format!("Tool {}", i),
+                ))
+                .unwrap();
+        }
         let desc = registry.execute_tool_description();
-        assert!(desc.contains("No standard library"));
-        assert!(desc.contains("No class definitions"));
-        assert!(desc.contains("sorted()"));
+        // Should contain compact signatures (tool_0(...))
+        assert!(desc.contains("tool_0("));
+        // Should NOT contain "total)" which signals names-only mode
+        assert!(!desc.contains("total)"));
+    }
+
+    #[test]
+    fn test_execute_description_uses_names_above_threshold() {
+        let registry = ToolRegistry::new();
+        // Register more than SIGNATURE_THRESHOLD tools
+        for i in 0..(ToolRegistry::SIGNATURE_THRESHOLD + 5) {
+            registry
+                .register_tool(create_test_tool(
+                    &format!("tool_{:03}", i),
+                    &format!("Tool {}", i),
+                ))
+                .unwrap();
+        }
+        let desc = registry.execute_tool_description();
+        // Should contain "total)" indicating names-only mode
+        assert!(desc.contains("total)"));
+        // Should NOT contain full signatures
+        assert!(!desc.contains("tool_000("));
+        // Should mention search tool
+        assert!(desc.contains("Use the separate search tool"));
+    }
+
+    // === validate_tool_args ===
+
+    #[test]
+    fn test_validate_tool_args_accepts_valid_params() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "get_customer".to_string(),
+                description: Some("Get customer".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "customer_id": { "type": "string" }
+                    },
+                    "required": ["customer_id"]
+                }),
+                output_schema: None,
+            })
+            .unwrap();
+
+        let result = registry.validate_tool_args(
+            "get_customer",
+            &serde_json::json!({"customer_id": "C-123"}),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_tool_args_rejects_unknown_params() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "get_customer".to_string(),
+                description: Some("Get customer".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "customer_id": { "type": "string" }
+                    },
+                    "required": ["customer_id"]
+                }),
+                output_schema: None,
+            })
+            .unwrap();
+
+        let result = registry.validate_tool_args(
+            "get_customer",
+            &serde_json::json!({"id": "C-123"}),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("does not accept parameter(s): id"));
+        assert!(err.contains("Expected: customer_id"));
+    }
+
+    #[test]
+    fn test_validate_tool_args_reports_multiple_unknown() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "send_email".to_string(),
+                description: None,
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "to": { "type": "string" },
+                        "body": { "type": "string" }
+                    }
+                }),
+                output_schema: None,
+            })
+            .unwrap();
+
+        let result = registry.validate_tool_args(
+            "send_email",
+            &serde_json::json!({"recipient": "a@b.com", "content": "hi"}),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("recipient"));
+        assert!(err.contains("content"));
+        assert!(err.contains("Expected: "));
+    }
+
+    #[test]
+    fn test_validate_tool_args_passes_empty_args() {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(ToolDefinition {
+                name: "ping".to_string(),
+                description: None,
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "target": { "type": "string" }
+                    }
+                }),
+                output_schema: None,
+            })
+            .unwrap();
+
+        let result = registry.validate_tool_args("ping", &serde_json::json!({}));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_tool_args_unknown_tool_passes() {
+        let registry = ToolRegistry::new();
+        let result = registry.validate_tool_args(
+            "nonexistent",
+            &serde_json::json!({"anything": "goes"}),
+        );
+        assert!(result.is_ok()); // unknown tool validation is handled elsewhere
     }
 }

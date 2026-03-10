@@ -1,0 +1,142 @@
+---
+import { Code } from "astro:components";
+
+interface ConversationMessage {
+  role: string;
+  content?: string;
+  toolCalls?: { name: string; input: unknown }[];
+  toolResults?: { name: string; output: unknown }[];
+}
+
+interface Props {
+  title: string;
+  conversation: ConversationMessage[];
+}
+
+const { title, conversation } = Astro.props;
+
+function truncate(s: string, n: number) {
+  return s.length > n ? s.slice(0, n) + "..." : s;
+}
+
+function prettyJson(obj: unknown): string {
+  return JSON.stringify(obj, null, 2);
+}
+
+// Build structured steps from conversation
+interface FlowStep {
+  role: string;
+  label: string;
+  expandable: boolean;
+  detail?: string;
+  detailType?: "text" | "json" | "code";
+}
+
+const steps: FlowStep[] = [];
+
+for (const msg of conversation) {
+  if (msg.role === "user") {
+    steps.push({
+      role: "user",
+      label: truncate(msg.content ?? "", 44),
+      expandable: (msg.content ?? "").length > 44,
+      detail: msg.content,
+      detailType: "text",
+    });
+  } else if (msg.role === "assistant") {
+    if (msg.toolCalls && msg.toolCalls.length > 0) {
+      for (const tc of msg.toolCalls) {
+        if (tc.name === "execute") {
+          const code = (tc.input as { code: string }).code;
+          const toolCount = (code.match(/tool\(/g) || []).length;
+          steps.push({
+            role: "llm",
+            label: `execute (${toolCount} tools)`,
+            expandable: true,
+            detail: code.trim(),
+            detailType: "code",
+          });
+        } else {
+          steps.push({
+            role: "llm",
+            label: tc.name,
+            expandable: !!tc.input && Object.keys(tc.input as object).length > 0,
+            detail: prettyJson(tc.input),
+            detailType: "json",
+          });
+        }
+      }
+    } else {
+      const text = msg.content ?? "";
+      steps.push({
+        role: "llm",
+        label: "Summary",
+        expandable: text.length > 0,
+        detail: truncate(text, 280),
+        detailType: "text",
+      });
+    }
+  } else if (msg.role === "tool") {
+    if (msg.toolResults) {
+      for (const tr of msg.toolResults) {
+        steps.push({
+          role: "tool",
+          label: tr.name,
+          expandable: true,
+          detail: prettyJson(tr.output),
+          detailType: "json",
+        });
+      }
+    }
+  }
+}
+---
+
+<div class="lane">
+  <div class="lane-title">{title}</div>
+  <div class="flow">
+    {steps.map((step) => (
+      <div class={`flow-item ${step.expandable ? "expandable" : ""}`}>
+        <button
+          class="flow-header"
+          disabled={!step.expandable}
+          aria-expanded="false"
+        >
+          <span class={`flow-dot flow-dot--${step.role}`} />
+          <span class="flow-role">{step.role}</span>
+          <span class="flow-label">
+            {step.role === "llm" && <span class="flow-arrow">&rarr;</span>}
+            {step.role === "tool" && <span class="flow-arrow">&larr;</span>}
+            <span class={step.role === "llm" || step.role === "tool" ? "flow-tool-name" : ""}>{step.label}</span>
+          </span>
+          {step.expandable && (
+            <svg class="flow-caret" width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <path d="M3.5 2L6.5 5L3.5 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          )}
+        </button>
+        {step.expandable && (
+          <div class="flow-expand">
+            <div class="flow-expand-inner">
+              <div class="flow-detail-border">
+                {step.detailType === "text" && (
+                  <p class="flow-detail-text">{step.detail}</p>
+                )}
+                {step.detailType === "json" && (
+                  <div class="flow-detail-code">
+                    <Code code={step.detail!} lang="json" theme="github-light" />
+                  </div>
+                )}
+                {step.detailType === "code" && (
+                  <div class="flow-detail-code">
+                    <Code code={step.detail!} lang="python" theme="github-light" />
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    ))}
+  </div>
+</div>

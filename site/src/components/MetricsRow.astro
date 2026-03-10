@@ -1,0 +1,22 @@
+---
+interface Metric {
+  value: string;
+  label: string;
+  negative?: boolean;
+}
+
+interface Props {
+  metrics: Metric[];
+}
+
+const { metrics } = Astro.props;
+---
+
+<div class="metrics-row">
+  {metrics.map((m) => (
+    <div class="metric-pill">
+      <span class={`metric-value${m.negative ? " negative" : ""}`}>{m.value}</span>
+      <span class="metric-label">{m.label}</span>
+    </div>
+  ))}
+</div>

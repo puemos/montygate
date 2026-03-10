@@ -317,6 +317,36 @@ const { text } = await generateText({
 });
 ```
 
+## Performance
+
+Montygate collapses N tool calls into 1 LLM round-trip. The savings grow with the number of tools:
+
+```
++------------------------------+---------------+---------------+----------+
+| Scenario                     |   Traditional |     Montygate |  Savings |
++------------------------------+---------------+---------------+----------+
+| Customer Support (3 tools)   |               |               |          |
+|   Round trips                |             4 |             2 |      50% |
+|   Input tokens               |         3,693 |         1,140 |      69% |
+|   Est. cost                  |       $0.0153 |       $0.0067 |      56% |
+|   Est. latency               |       3,350ms |       1,650ms |      51% |
++------------------------------+---------------+---------------+----------+
+| Complex Orchestration (5)    |               |               |          |
+|   Round trips                |             6 |             2 |      67% |
+|   Input tokens               |         8,090 |         1,216 |      85% |
+|   Est. cost                  |       $0.0303 |       $0.0069 |      77% |
+|   Est. latency               |       5,050ms |       1,650ms |      67% |
++------------------------------+---------------+---------------+----------+
+| High Fan-Out (7 tools)       |               |               |          |
+|   Round trips                |             8 |             2 |      75% |
+|   Input tokens               |        13,343 |         1,178 |      91% |
+|   Est. cost                  |       $0.0478 |       $0.0068 |      86% |
+|   Est. latency               |       6,750ms |       1,650ms |      76% |
++------------------------------+---------------+---------------+----------+
+```
+
+*Cost model: Claude Sonnet ($3/MTok input, $15/MTok output), 800ms avg LLM latency. Traditional = N+1 round-trips with growing context. Montygate = 2 round-trips (script + answer). Run `cargo test benchmark_comparison -- --nocapture` or `pnpm test benchmark` to reproduce.*
+
 ## Python Subset
 
 Montygate uses the [Monty interpreter](https://github.com/pydantic/monty) (v0.0.4), a sandboxed Python implementation in Rust. No filesystem, network, or import access.

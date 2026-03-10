@@ -14,7 +14,10 @@ import type {
   ToolOptions,
   TraceEntry,
 } from "./types.js";
-import { unwrapExecutionResult } from "./adapters/utils.js";
+import {
+  buildStateSummary,
+  unwrapExecutionResult,
+} from "./adapters/utils.js";
 
 /**
  * Binding types from the native NAPI module.
@@ -36,9 +39,10 @@ interface NativeEngine {
   ): Promise<NativeExecutionResult>;
   search(query: string, topK?: number | null): NativeSearchResult[];
   getToolCatalog(): string;
+  getToolSignatures(): string;
+  getSystemPrompt(): string;
   getExecuteToolDescription(): string;
   getSearchToolDescription(): string;
-  getSystemPrompt(): string;
   getExecuteToolInputSchema(): Record<string, unknown>;
   getSearchToolInputSchema(): Record<string, unknown>;
   toolCount(): number;
@@ -153,9 +157,20 @@ try {
  * `);
  * ```
  */
+/** Name-error pattern emitted by the Monty sandbox. */
+const NAME_ERROR_RE = /NameError: name '(\w+)' is not defined/;
+
 export class Montygate {
   private native: NativeEngine;
   private toolHandles = new Map<string, ToolHandle>();
+  private zodParams = new Map<string, z.ZodType>();
+  private stateInjectionEnabled: boolean;
+
+  /**
+   * Cached tool results from prior execute() calls, keyed by `last_<tool_name>`.
+   * Also contains `last_result` (the prior script's final output).
+   */
+  private stateCache: Record<string, unknown> = {};
 
   constructor(config?: MontygateConfig) {
     if (!NativeEngineClass) {
@@ -202,6 +217,8 @@ export class Montygate {
       Object.keys(nativeConfig).length > 0 ? nativeConfig : undefined,
     ) as NativeEngine;
 
+    this.stateInjectionEnabled = config?.stateInjection !== false;
+
     if (config?.tools) {
       this.tools(config.tools, config.handlers);
     }
@@ -210,19 +227,28 @@ export class Montygate {
   /**
    * Register a tool with a Zod schema and async handler.
    */
+  private static RESERVED_NAMES = new Set(["execute", "search"]);
+
   tool<T extends z.ZodType>(name: string, options: ToolOptions<T>): this {
+    if (Montygate.RESERVED_NAMES.has(name)) {
+      throw new Error(`Tool name '${name}' is reserved by Montygate.`);
+    }
+
     const inputSchema = zodToJsonSchema(options.params);
     const outputSchema = options.returns
       ? zodToJsonSchema(options.returns)
       : undefined;
 
+    const handler = options.run as (args: unknown) => Promise<unknown>;
     const handle: ToolHandle = {
       name,
       description: options.description,
       inputSchema,
       outputSchema,
+      handler,
     };
     this.toolHandles.set(name, handle);
+    this.zodParams.set(name, options.params);
 
     this.native.registerTool(
       {
@@ -264,6 +290,10 @@ export class Montygate {
 
       const normalized = normalizeTool(rawTool, format, handlers, keyName);
 
+      if (Montygate.RESERVED_NAMES.has(normalized.name)) {
+        throw new Error(`Tool name '${normalized.name}' is reserved by Montygate.`);
+      }
+
       if (!normalized.handler && !handlers?.[normalized.name]) {
         throw new Error(
           `Tool '${normalized.name}' (detected as ${format} format) has no handler. Pass one in the handlers map.`,
@@ -279,6 +309,7 @@ export class Montygate {
         name: normalized.name,
         description: normalized.description,
         inputSchema: normalized.inputSchema,
+        handler,
       };
       this.toolHandles.set(normalized.name, handle);
 
@@ -323,8 +354,34 @@ export class Montygate {
   }
 
   /**
+   * Get compact tool signatures: `name(param1, param2) -> {field1, field2}`.
+   */
+  getToolSignatures(): string {
+    return this.native.getToolSignatures();
+  }
+
+  /**
+   * Get the recommended system prompt for LLM conversations.
+   *
+   * Strategic guidance for the LLM — how to use the sandbox effectively.
+   * Prepend or append to your own system prompt:
+   *
+   * ```ts
+   * const response = await client.messages.create({
+   *   system: `You are a support agent.\n\n${gate.systemPrompt()}`,
+   *   tools: gate.anthropic(),
+   *   messages,
+   * });
+   * ```
+   */
+  systemPrompt(): string {
+    return this.native.getSystemPrompt();
+  }
+
+  /**
    * Get the canonical "execute" tool description for LLM adapters.
-   * Includes the tool catalog, usage instructions, and examples.
+   * Includes compact tool signatures (≤20 tools) or names-only listing
+   * (>20 tools), usage instructions, and examples.
    */
   getExecuteToolDescription(): string {
     return this.native.getExecuteToolDescription();
@@ -358,14 +415,6 @@ export class Montygate {
   }
 
   /**
-   * Get a system prompt that guides the LLM toward efficient single-script usage.
-   * Include this in your API call's system message for best results.
-   */
-  getSystemPrompt(): string {
-    return this.native.getSystemPrompt();
-  }
-
-  /**
    * Get the canonical JSON Schema for the `execute` tool's input parameters.
    * Use this in adapters instead of hard-coding the schema.
    */
@@ -381,6 +430,110 @@ export class Montygate {
     return this.native.getSearchToolInputSchema() as Record<string, unknown>;
   }
 
+  /**
+   * Clear all cached state from prior execute() calls.
+   * Call this between conversations to reset the injection context.
+   */
+  clearStateCache(): void {
+    this.stateCache = {};
+  }
+
+  /**
+   * Get a human-readable summary of the accumulated state cache.
+   * Useful for appending to system prompts in agent loops so the LLM
+   * knows which prior results are available.
+   *
+   * Returns `null` if no state has been cached yet.
+   */
+  getStateSummary(): string | null {
+    return buildStateSummary(this.stateCache);
+  }
+
+  // --- Private helpers ---
+
+  /**
+   * Execute a script with automatic state injection and NameError auto-retry.
+   *
+   * 1. Merges cached tool results into the sandbox as `last_<tool>` variables.
+   * 2. Runs the script.
+   * 3. On success, updates the cache with new tool results.
+   * 4. On NameError for a variable that exists in the cache, retries once
+   *    with the missing variable explicitly injected.
+   */
+  private async executeWithStateInjection(
+    code: string,
+    explicitInputs?: Record<string, unknown>,
+  ): Promise<ExecutionResult> {
+    const merged = this.stateInjectionEnabled
+      ? { ...this.stateCache, ...(explicitInputs ?? {}) }
+      : (explicitInputs ?? {});
+
+    const result = await this.execute(code, merged);
+    this.updateCacheFromResult(result);
+
+    // Auto-retry: if the error is a NameError for a cached variable, retry once
+    if (this.stateInjectionEnabled && isNameError(result)) {
+      const varName = extractNameErrorVariable(result);
+      if (varName) {
+        const cached =
+          this.stateCache[varName] ?? this.stateCache[`last_${varName}`];
+        if (cached !== undefined) {
+          const retryInputs = { ...merged, [varName]: cached };
+          const retryResult = await this.execute(code, retryInputs);
+          this.updateCacheFromResult(retryResult);
+          return retryResult;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private updateCacheFromResult(result: ExecutionResult): void {
+    if (!this.stateInjectionEnabled) return;
+
+    for (const entry of result.trace) {
+      if (entry.output !== undefined && !entry.error) {
+        this.stateCache[`last_${entry.toolName}`] = entry.output;
+      }
+    }
+    // Only cache output for successful executions (no sandbox error)
+    if (!isNameError(result)) {
+      this.stateCache["last_result"] = result.output;
+    }
+  }
+
+  /**
+   * If the result is a NameError whose undefined name matches a registered
+   * tool, replace the generic error with a targeted hint telling the LLM
+   * to use the tool() calling convention.
+   */
+  private enhanceNameError(result: ExecutionResult): ExecutionResult {
+    const output = result.output;
+    if (
+      output != null &&
+      typeof output === "object" &&
+      !Array.isArray(output) &&
+      (output as Record<string, unknown>).status === "error"
+    ) {
+      const err = (output as Record<string, unknown>).error;
+      if (typeof err === "string") {
+        const match = err.match(NAME_ERROR_RE);
+        if (match && this.toolHandles.has(match[1])) {
+          const name = match[1];
+          return {
+            ...result,
+            output: {
+              status: "error",
+              error: `NameError: '${name}' is not a Python function — use tool('${name}', key=value) to call it.`,
+            },
+          };
+        }
+      }
+    }
+    return result;
+  }
+
   // --- LLM adapter methods ---
 
   /**
@@ -388,9 +541,15 @@ export class Montygate {
    * Returns [execute, search] tools for use with the Anthropic SDK.
    */
   anthropic(): AnthropicTool[] {
+    const originalTools = [...this.toolHandles.values()].map((h) => ({
+      name: h.name,
+      description: h.description ?? "",
+      input_schema: h.inputSchema as AnthropicTool["input_schema"],
+    }));
     const execSchema = this.getExecuteToolInputSchema();
     const searchSchema = this.getSearchToolInputSchema();
     return [
+      ...originalTools,
       {
         name: "execute",
         description: this.getExecuteToolDescription(),
@@ -409,9 +568,20 @@ export class Montygate {
    * Returns [execute, search] function tools for use with the OpenAI SDK.
    */
   openai(): OpenAITool[] {
+    const originalTools: OpenAITool[] = [...this.toolHandles.values()].map(
+      (h) => ({
+        type: "function" as const,
+        function: {
+          name: h.name,
+          description: h.description ?? "",
+          parameters: h.inputSchema as OpenAITool["function"]["parameters"],
+        },
+      }),
+    );
     const execSchema = this.getExecuteToolInputSchema();
     const searchSchema = this.getSearchToolInputSchema();
     return [
+      ...originalTools,
       {
         type: "function",
         function: {
@@ -436,43 +606,53 @@ export class Montygate {
    * Returns { execute, search } for use with generateText() / streamText().
    */
   vercelai(): Record<string, VercelAIToolDef> {
-    return {
-      execute: {
-        description: this.getExecuteToolDescription(),
-        parameters: z.object({
-          code: z.string().describe("Python script to execute"),
-          inputs: z
-            .record(z.unknown())
-            .optional()
-            .describe("Variables to inject into the script"),
-        }),
-        execute: async (args) => {
-          const result = await this.execute(
-            args.code as string,
-            args.inputs as Record<string, unknown> | undefined,
-          );
-          return unwrapExecutionResult(result);
-        },
-      },
-      search: {
-        description: this.getSearchToolDescription(),
-        parameters: z.object({
-          query: z.string().describe("Search query"),
-          top_k: z.number().optional().describe("Maximum number of results"),
-        }),
-        execute: async (args) => {
-          return this.search(
-            args.query as string,
-            args.top_k as number | undefined,
-          );
-        },
+    const tools: Record<string, VercelAIToolDef> = {};
+
+    for (const [name, handle] of this.toolHandles) {
+      const zodSchema = this.zodParams.get(name);
+      tools[name] = {
+        description: handle.description ?? "",
+        parameters: zodSchema ?? handle.inputSchema,
+        execute: handle.handler!,
+      };
+    }
+
+    tools.execute = {
+      description: this.getExecuteToolDescription(),
+      parameters: z.object({
+        code: z.string().describe("Python script to execute"),
+      }),
+      execute: async (args) => {
+        const raw = await this.executeWithStateInjection(args.code as string);
+        const result = this.enhanceNameError(raw);
+        return unwrapExecutionResult(result);
       },
     };
+
+    tools.search = {
+      description: this.getSearchToolDescription(),
+      parameters: z.object({
+        query: z.string().describe("Search query"),
+        top_k: z.number().optional().describe("Maximum number of results"),
+      }),
+      execute: async (args) => {
+        return this.search(
+          args.query as string,
+          args.top_k as number | undefined,
+        );
+      },
+    };
+
+    return tools;
   }
 
   /**
    * Handle a tool call from any LLM framework.
    * Accepts either an object (Anthropic) or a JSON string (OpenAI) as args.
+   *
+   * When state injection is enabled (default), `execute` calls automatically
+   * receive cached results from prior executions as sandbox variables,
+   * and NameErrors for cached variables are auto-retried.
    */
   async handleToolCall(
     name: string,
@@ -484,16 +664,19 @@ export class Montygate {
         : args;
 
     if (name === "execute") {
-      const result = await this.execute(
-        input.code as string,
-        input.inputs as Record<string, unknown> | undefined,
-      );
+      const raw = await this.executeWithStateInjection(input.code as string);
+      const result = this.enhanceNameError(raw);
       return unwrapExecutionResult(result);
     } else if (name === "search") {
       return this.search(
         input.query as string,
         input.top_k as number | undefined,
       );
+    }
+
+    const handle = this.toolHandles.get(name);
+    if (handle?.handler) {
+      return handle.handler(input);
     }
     throw new Error(`Unknown tool: ${name}`);
   }
@@ -527,10 +710,13 @@ export interface OpenAITool {
 /**
  * Vercel AI SDK tool definition shape.
  * Compatible with the `tool()` helper from `ai` package.
+ *
+ * `parameters` is a Zod schema for tools registered via `.tool()`,
+ * or a JSON Schema object for tools registered via `.tools()`.
  */
 export interface VercelAIToolDef {
   description: string;
-  parameters: z.ZodType;
+  parameters: z.ZodType | Record<string, unknown>;
   execute: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -554,6 +740,36 @@ function mapSearchResult(result: NativeSearchResult): SearchResult {
       ? (result.outputSchema as Record<string, unknown>)
       : undefined,
   };
+}
+
+function isNameError(result: ExecutionResult): boolean {
+  const output = result.output;
+  if (
+    output != null &&
+    typeof output === "object" &&
+    !Array.isArray(output) &&
+    (output as Record<string, unknown>).status === "error"
+  ) {
+    const err = (output as Record<string, unknown>).error;
+    return typeof err === "string" && NAME_ERROR_RE.test(err);
+  }
+  return false;
+}
+
+function extractNameErrorVariable(result: ExecutionResult): string | null {
+  const output = result.output;
+  if (
+    output != null &&
+    typeof output === "object" &&
+    !Array.isArray(output)
+  ) {
+    const err = (output as Record<string, unknown>).error;
+    if (typeof err === "string") {
+      const match = err.match(NAME_ERROR_RE);
+      return match ? match[1] : null;
+    }
+  }
+  return null;
 }
 
 function mapExecutionResult(raw: NativeExecutionResult): ExecutionResult {

@@ -1,8 +1,8 @@
 use crate::MontygateError;
 use crate::types::{ExecutionResult, ResourceLimits, Result, RunProgramInput, ToolCall};
 use monty::{
-    CollectStringPrint, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject,
-    MontyRun, RunProgress,
+    ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject, MontyRun, PrintWriter,
+    RunProgress,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -561,7 +561,7 @@ fn run_monty_blocking(
     };
 
     let tracker = LimitedTracker::new(limits);
-    let mut print = CollectStringPrint::new();
+    let mut print = PrintWriter::Collect(String::new());
 
     let mut progress = match runner.start(input_values, tracker, &mut print) {
         Ok(p) => p,
@@ -569,7 +569,7 @@ fn run_monty_blocking(
             return MontyBlockingResult {
                 success: false,
                 result: serde_json::Value::Null,
-                stdout: print.output().to_string(),
+                stdout: print.collected_output().unwrap_or("").to_string(),
                 error: Some(format_exception(&e)),
                 execution_time_ms: start.elapsed().as_millis() as u64,
             };
@@ -585,7 +585,7 @@ fn run_monty_blocking(
                 return MontyBlockingResult {
                     success: true,
                     result: json_value,
-                    stdout: print.output().to_string(),
+                    stdout: print.collected_output().unwrap_or("").to_string(),
                     error: None,
                     execution_time_ms: start.elapsed().as_millis() as u64,
                 };
@@ -595,6 +595,7 @@ fn run_monty_blocking(
                 args,
                 kwargs,
                 call_id: _,
+                method_call: _,
                 state,
             } => {
                 let ext_result = match function_name.as_str() {
@@ -617,7 +618,7 @@ fn run_monty_blocking(
                                     return MontyBlockingResult {
                                         success: false,
                                         result: serde_json::Value::Null,
-                                        stdout: print.output().to_string(),
+                                        stdout: print.collected_output().unwrap_or("").to_string(),
                                         error: Some(format_exception(&e)),
                                         execution_time_ms: start.elapsed().as_millis() as u64,
                                     };
@@ -640,7 +641,7 @@ fn run_monty_blocking(
                                             return MontyBlockingResult {
                                                 success: false,
                                                 result: serde_json::Value::Null,
-                                                stdout: print.output().to_string(),
+                                                stdout: print.collected_output().unwrap_or("").to_string(),
                                                 error: Some(format_exception(&e)),
                                                 execution_time_ms: start.elapsed().as_millis()
                                                     as u64,
@@ -665,7 +666,7 @@ fn run_monty_blocking(
                             return MontyBlockingResult {
                                 success: false,
                                 result: serde_json::Value::Null,
-                                stdout: print.output().to_string(),
+                                stdout: print.collected_output().unwrap_or("").to_string(),
                                 error: Some(
                                     "Execution cancelled: dispatcher channel closed".to_string(),
                                 ),
@@ -701,7 +702,7 @@ fn run_monty_blocking(
                                         return MontyBlockingResult {
                                             success: false,
                                             result: serde_json::Value::Null,
-                                            stdout: print.output().to_string(),
+                                            stdout: print.collected_output().unwrap_or("").to_string(),
                                             error: Some(format_exception(&e)),
                                             execution_time_ms: start.elapsed().as_millis() as u64,
                                         };
@@ -728,7 +729,7 @@ fn run_monty_blocking(
                                     return MontyBlockingResult {
                                         success: false,
                                         result: serde_json::Value::Null,
-                                        stdout: print.output().to_string(),
+                                        stdout: print.collected_output().unwrap_or("").to_string(),
                                         error: Some(format_exception(&e)),
                                         execution_time_ms: start.elapsed().as_millis() as u64,
                                     };
@@ -750,7 +751,7 @@ fn run_monty_blocking(
                             return MontyBlockingResult {
                                 success: false,
                                 result: serde_json::Value::Null,
-                                stdout: print.output().to_string(),
+                                stdout: print.collected_output().unwrap_or("").to_string(),
                                 error: Some(
                                     "Execution cancelled: dispatcher channel closed".to_string(),
                                 ),
@@ -798,7 +799,7 @@ fn run_monty_blocking(
                                 return MontyBlockingResult {
                                     success: false,
                                     result: serde_json::Value::Null,
-                                    stdout: print.output().to_string(),
+                                    stdout: print.collected_output().unwrap_or("").to_string(),
                                     error: Some(format_exception(&e)),
                                     execution_time_ms: start.elapsed().as_millis() as u64,
                                 };
@@ -813,7 +814,7 @@ fn run_monty_blocking(
                         return MontyBlockingResult {
                             success: false,
                             result: serde_json::Value::Null,
-                            stdout: print.output().to_string(),
+                            stdout: print.collected_output().unwrap_or("").to_string(),
                             error: Some(format_exception(&e)),
                             execution_time_ms: start.elapsed().as_millis() as u64,
                         };
@@ -834,7 +835,7 @@ fn run_monty_blocking(
                         return MontyBlockingResult {
                             success: false,
                             result: serde_json::Value::Null,
-                            stdout: print.output().to_string(),
+                            stdout: print.collected_output().unwrap_or("").to_string(),
                             error: Some(format_exception(&e)),
                             execution_time_ms: start.elapsed().as_millis() as u64,
                         };
@@ -845,7 +846,7 @@ fn run_monty_blocking(
                 return MontyBlockingResult {
                     success: false,
                     result: serde_json::Value::Null,
-                    stdout: print.output().to_string(),
+                    stdout: print.collected_output().unwrap_or("").to_string(),
                     error: Some("Async operations are not supported in the sandbox.".to_string()),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                 };
