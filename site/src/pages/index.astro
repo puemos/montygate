@@ -65,31 +65,34 @@ const response = await client.messages.create({
     <section class="hero">
       <h2>What this looks like</h2>
 
-      <div class="scenario-tabs" role="tablist">
+      <div class="scenario-chips" role="tablist">
         {scenarios.map((s, i) => (
           <button
-            class={`scenario-tab ${i === 0 ? "active" : ""}`}
+            class={`scenario-chip ${i === 0 ? "active" : ""}`}
             role="tab"
             aria-selected={i === 0 ? "true" : "false"}
             data-tab={i}
           >
             {s.name}
-            <span class="scenario-tab-tools">{s.tools} tools</span>
           </button>
         ))}
       </div>
 
       {scenarios.map((s, i) => (
         <div class={`scenario-panel ${i === 0 ? "active" : ""}`} data-panel={i} role="tabpanel">
-          <div class="comparison-grid">
-            <ConversationFlow
-              title="Traditional"
-              conversation={s.traditional?.conversation ?? []}
-            />
-            <ConversationFlow
-              title="Montygate"
-              conversation={s.montygate?.conversation ?? []}
-            />
+          <div class="flow-wrapper">
+            <div class="comparison-grid">
+              <ConversationFlow
+                title="Traditional"
+                conversation={s.traditional?.conversation ?? []}
+              />
+              <ConversationFlow
+                title="Montygate"
+                conversation={s.montygate?.conversation ?? []}
+              />
+            </div>
+            <div class="flow-fade"></div>
+            <button class="flow-expand-btn">Show more</button>
           </div>
           {s.montygate?.savingsVsTraditional && (
             <MetricsRow
@@ -133,7 +136,6 @@ const response = await client.messages.create({
         <thead>
           <tr>
             <th>Scenario</th>
-            <th>Mode</th>
             <th>Tools</th>
             <th>Round-trips</th>
             <th>Tokens</th>
@@ -145,7 +147,6 @@ const response = await client.messages.create({
           {tableRows.map((row) => (
             <tr>
               <td class="scenario-name">{row.scenario}</td>
-              <td>{row.mode}</td>
               <td>{row.tools}</td>
               <td class={row.savings.round_trips_pct >= 0 ? "positive" : "negative"}>
                 {row.savings.round_trips_pct >= 0 ? "-" : "+"}{Math.abs(row.savings.round_trips_pct)}%
@@ -187,29 +188,62 @@ const response = await client.messages.create({
     </footer>
 
     <script>
-      // Expand/collapse flow items
+      // Expand/collapse flow items — auto-expand wrapper if collapsed
       document.querySelectorAll('.flow-item.expandable .flow-header').forEach(btn => {
         btn.addEventListener('click', () => {
           const item = btn.closest('.flow-item')!;
           const isOpen = item.classList.toggle('open');
           btn.setAttribute('aria-expanded', String(isOpen));
+
+          if (isOpen) {
+            const wrapper = item.closest('.flow-wrapper');
+            if (wrapper && !wrapper.classList.contains('expanded')) {
+              wrapper.classList.add('expanded');
+              const expandBtn = wrapper.querySelector('.flow-expand-btn') as HTMLElement;
+              if (expandBtn) expandBtn.textContent = 'Show less';
+            }
+          }
         });
       });
 
-      // Scenario tab switching
-      document.querySelectorAll('.scenario-tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-          const idx = (tab as HTMLElement).dataset.tab;
-          // Update tabs
-          document.querySelectorAll('.scenario-tab').forEach(t => {
+      // Flow wrapper: detect if content fits, handle expand/collapse
+      function checkFlowFit(wrapper: Element) {
+        const grid = wrapper.querySelector('.comparison-grid') as HTMLElement;
+        if (!grid) return;
+        // Only check visible wrappers (hidden ones report 0 scrollHeight)
+        if (grid.scrollHeight <= 360 && grid.scrollHeight > 0) {
+          wrapper.classList.add('fits');
+        } else {
+          wrapper.classList.remove('fits');
+        }
+      }
+
+      document.querySelectorAll('.flow-wrapper').forEach(wrapper => {
+        const btn = wrapper.querySelector('.flow-expand-btn') as HTMLElement;
+        if (!btn) return;
+        checkFlowFit(wrapper);
+        btn.addEventListener('click', () => {
+          const expanded = wrapper.classList.toggle('expanded');
+          btn.textContent = expanded ? 'Show less' : 'Show more';
+        });
+      });
+
+      // Scenario chip switching
+      document.querySelectorAll('.scenario-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+          const idx = (chip as HTMLElement).dataset.tab;
+          document.querySelectorAll('.scenario-chip').forEach(t => {
             const active = (t as HTMLElement).dataset.tab === idx;
             t.classList.toggle('active', active);
             t.setAttribute('aria-selected', String(active));
           });
-          // Update panels
           document.querySelectorAll('.scenario-panel').forEach(p => {
             (p as HTMLElement).classList.toggle('active', (p as HTMLElement).dataset.panel === idx);
           });
+          // Re-check fit for newly visible panel
+          const activePanel = document.querySelector(`.scenario-panel[data-panel="${idx}"]`);
+          const wrapper = activePanel?.querySelector('.flow-wrapper');
+          if (wrapper) checkFlowFit(wrapper);
         });
       });
     </script>

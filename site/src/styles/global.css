@@ -80,49 +80,38 @@ section.hero {
   margin-top: 8px;
 }
 
-/* Scenario tabs */
-.scenario-tabs {
+/* Scenario chips */
+.scenario-chips {
   display: flex;
-  gap: 0;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-bottom: 24px;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  border-bottom: 1px solid var(--color-border);
 }
 
-.scenario-tab {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  padding: 8px 16px 10px;
+.scenario-chip {
+  padding: 6px 14px;
   background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
   font: inherit;
   font-size: 13px;
   font-weight: 500;
   color: var(--color-text-dim);
   cursor: pointer;
   white-space: nowrap;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
-.scenario-tab:hover {
+.scenario-chip:hover {
   color: var(--color-text);
+  border-color: #ccc;
 }
 
-.scenario-tab.active {
+.scenario-chip.active {
   color: var(--color-text);
-  border-bottom-color: var(--color-text);
-  font-weight: 600;
-}
-
-.scenario-tab-tools {
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.5;
+  background: var(--color-text);
+  color: var(--color-bg);
+  border-color: var(--color-text);
 }
 
 /* Scenario panels */
@@ -143,6 +132,12 @@ section.hero {
   margin-left: calc((var(--max-width) - 960px) / 2);
 }
 
+/* Vertical divider between lanes */
+.comparison-grid > .lane:first-child {
+  border-right: 1px solid var(--color-border);
+  padding-right: 40px;
+}
+
 @media (max-width: 1024px) {
   .comparison-grid {
     width: calc(100vw - 48px);
@@ -154,6 +149,16 @@ section.hero {
   .comparison-grid {
     grid-template-columns: 1fr;
     gap: 32px;
+    column-gap: 0;
+  }
+
+  .comparison-grid > .lane:first-child,
+  .comparison-grid > .lane:last-child {
+    grid-column: 1;
+  }
+
+  .comparison-grid::before {
+    display: none;
   }
 }
 
@@ -163,13 +168,61 @@ section.hero {
 }
 
 .lane-title {
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--color-text-dim);
+  letter-spacing: -0.01em;
+  color: var(--color-text);
   margin-bottom: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--color-border);
+}
+
+/* Flow wrapper — collapsible with expand */
+.flow-wrapper {
+  position: relative;
+}
+
+.flow-wrapper:not(.expanded) .comparison-grid {
+  max-height: 360px;
+  overflow: hidden;
+}
+
+.flow-fade {
+  position: absolute;
+  bottom: 32px;
+  left: 0;
+  right: 0;
+  height: 56px;
+  background: linear-gradient(to bottom, transparent, var(--color-bg));
+  pointer-events: none;
+}
+
+.flow-wrapper.expanded .flow-fade {
+  display: none;
+}
+
+.flow-expand-btn {
+  display: block;
+  width: 100%;
+  padding: 8px 0;
+  background: none;
+  border: none;
+  outline: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-dim);
+  cursor: pointer;
+  text-align: center;
+  transition: color 0.15s;
+}
+
+.flow-expand-btn:hover {
+  color: var(--color-text);
+}
+
+/* Hide expand controls if content fits */
+.flow-wrapper.fits .flow-fade,
+.flow-wrapper.fits .flow-expand-btn {
+  display: none;
 }
 
 /* Flow timeline */
@@ -388,12 +441,27 @@ code {
   margin-top: 12px;
 }
 
-/* Benchmark table */
+/* Benchmark table — breaks out of the 640px body column */
 .benchmark-table {
-  width: 100%;
+  width: 960px;
+  margin-left: calc((var(--max-width) - 960px) / 2);
   border-collapse: collapse;
   font-size: 14px;
   margin-top: 12px;
+}
+
+@media (max-width: 1024px) {
+  .benchmark-table {
+    width: calc(100vw - 48px);
+    margin-left: calc((var(--max-width) - (100vw - 48px)) / 2);
+  }
+}
+
+@media (max-width: 680px) {
+  .benchmark-table {
+    width: 100%;
+    margin-left: 0;
+  }
 }
 
 .benchmark-table th {
@@ -402,8 +470,16 @@ code {
   font-size: 11px;
   letter-spacing: 0.06em;
   color: var(--color-text-dim);
-  padding: 8px 0;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--color-border);
+}
+
+.benchmark-table th:first-child {
+  padding-left: 0;
+}
+
+.benchmark-table th:last-child {
+  padding-right: 0;
 }
 
 .benchmark-table th:not(:first-child) {
@@ -411,8 +487,16 @@ code {
 }
 
 .benchmark-table td {
-  padding: 10px 0;
+  padding: 10px 16px;
   border-bottom: 1px solid #f2f2f2;
+}
+
+.benchmark-table td:first-child {
+  padding-left: 0;
+}
+
+.benchmark-table td:last-child {
+  padding-right: 0;
 }
 
 .benchmark-table td:not(:first-child) {
@@ -437,9 +521,6 @@ code {
   color: var(--color-red);
 }
 
-.benchmark-table tr:last-child td {
-  border-bottom: none;
-}
 
 .eval-score {
   font-family: var(--font-mono);
