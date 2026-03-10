@@ -7,8 +7,7 @@ import { normalizeBenchmarkData } from "../lib/benchmark";
 
 import data from "../../../packages/node/benchmark-results.json";
 
-const { scenarios, availableModes, defaultMode, tableRows } =
-  normalizeBenchmarkData(data);
+const { scenarios, tableRows } = normalizeBenchmarkData(data);
 
 const pythonSnippet = `order = tool('lookup_order', order_id='ORD-7291')
 customer = tool('get_customer', customer_id=order['customer_id'])
@@ -66,21 +65,6 @@ const response = await client.messages.create({
     <section class="hero">
       <h2>What this looks like</h2>
 
-      {availableModes.length > 0 && (
-        <div class="mode-tabs" role="tablist" aria-label="Montygate mode">
-          {availableModes.map((mode) => (
-            <button
-              class={`mode-tab ${mode.key === defaultMode ? "active" : ""}`}
-              role="tab"
-              aria-selected={mode.key === defaultMode ? "true" : "false"}
-              data-mode-tab={mode.key}
-            >
-              {mode.label}
-            </button>
-          ))}
-        </div>
-      )}
-
       <div class="scenario-tabs" role="tablist">
         {scenarios.map((s, i) => (
           <button
@@ -102,53 +86,33 @@ const response = await client.messages.create({
               title="Traditional"
               conversation={s.traditional?.conversation ?? []}
             />
-            {availableModes.map((mode) => {
-              const variant = s[mode.key];
-              if (!variant) return null;
-              return (
-                <div
-                  class={`mode-pane ${mode.key === defaultMode ? "active" : ""}`}
-                  data-mode-pane={mode.key}
-                >
-                  <ConversationFlow
-                    title={`Montygate ${variant.label}`}
-                    conversation={variant.conversation}
-                  />
-                </div>
-              );
-            })}
+            <ConversationFlow
+              title="Montygate"
+              conversation={s.montygate?.conversation ?? []}
+            />
           </div>
-          {availableModes.map((mode) => {
-            const variant = s[mode.key];
-            if (!variant?.savingsVsTraditional) return null;
-            return (
-              <div
-                class={`mode-metrics ${mode.key === defaultMode ? "active" : ""}`}
-                data-mode-metrics={mode.key}
-              >
-                <MetricsRow
-                  metrics={[
-                    {
-                      value: `${variant.savingsVsTraditional.round_trips_pct}%`,
-                      label: "fewer round-trips",
-                    },
-                    {
-                      value: `${variant.savingsVsTraditional.input_tokens_pct}%`,
-                      label: "fewer tokens",
-                    },
-                    {
-                      value: `${variant.savingsVsTraditional.cost_pct}%`,
-                      label: "lower agent cost",
-                    },
-                    {
-                      value: `${variant.eval.passed}/${variant.eval.total}`,
-                      label: "eval score",
-                    },
-                  ]}
-                />
-              </div>
-            );
-          })}
+          {s.montygate?.savingsVsTraditional && (
+            <MetricsRow
+              metrics={[
+                {
+                  value: `${s.montygate.savingsVsTraditional.round_trips_pct}%`,
+                  label: "fewer round-trips",
+                },
+                {
+                  value: `${s.montygate.savingsVsTraditional.input_tokens_pct}%`,
+                  label: "fewer tokens",
+                },
+                {
+                  value: `${s.montygate.savingsVsTraditional.cost_pct}%`,
+                  label: "lower agent cost",
+                },
+                {
+                  value: `${s.montygate.eval.passed}/${s.montygate.eval.total}`,
+                  label: "eval score",
+                },
+              ]}
+            />
+          )}
         </div>
       ))}
     </section>
@@ -245,23 +209,6 @@ const response = await client.messages.create({
           // Update panels
           document.querySelectorAll('.scenario-panel').forEach(p => {
             (p as HTMLElement).classList.toggle('active', (p as HTMLElement).dataset.panel === idx);
-          });
-        });
-      });
-
-      document.querySelectorAll('[data-mode-tab]').forEach(tab => {
-        tab.addEventListener('click', () => {
-          const mode = (tab as HTMLElement).dataset.modeTab;
-          document.querySelectorAll('[data-mode-tab]').forEach(t => {
-            const active = (t as HTMLElement).dataset.modeTab === mode;
-            t.classList.toggle('active', active);
-            t.setAttribute('aria-selected', String(active));
-          });
-          document.querySelectorAll('[data-mode-pane]').forEach(p => {
-            (p as HTMLElement).classList.toggle('active', (p as HTMLElement).dataset.modePane === mode);
-          });
-          document.querySelectorAll('[data-mode-metrics]').forEach(p => {
-            (p as HTMLElement).classList.toggle('active', (p as HTMLElement).dataset.modeMetrics === mode);
           });
         });
       });

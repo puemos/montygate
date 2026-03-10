@@ -456,7 +456,7 @@ describe("e2e: adapter round-trip with real engine", () => {
     expect(hits[0].name).toBe("get_weather");
   });
 
-  it("hybrid flow: mix direct calls and execute calls", async () => {
+  it("mixed flow: direct calls and execute calls share tools", async () => {
     // Direct call
     const weather = await gate.handleToolCall("get_weather", { city: "NYC" });
     expect(weather).toEqual({ city: "NYC", temp: 22, condition: "sunny" });
@@ -472,7 +472,7 @@ w['city'] + ' is ' + w['condition']
   });
 });
 
-describe("e2e: state injection", () => {
+describe("e2e: execute calls are isolated", () => {
   let gate: Montygate;
 
   beforeEach(() => {
@@ -505,304 +505,47 @@ describe("e2e: state injection", () => {
     });
   });
 
-  it("cached tool results are available in subsequent execute via handleToolCall", async () => {
-    // First call: fetch customer
+  it("does not carry prior execute results into a later handleToolCall", async () => {
     await gate.handleToolCall("execute", {
       code: "tool('get_customer', customer_id='CUST-1')",
     });
 
-    // Second call: use last_get_customer — should NOT need to call get_customer again
-    const result = await gate.handleToolCall("execute", {
-      code: "last_get_customer['name']",
-    });
-
-    expect(result).toBe("Alice");
+    await expect(
+      gate.handleToolCall("execute", {
+        code: "customer['name']",
+      }),
+    ).rejects.toThrow("NameError");
   });
 
-  it("last_result contains prior script output", async () => {
-    await gate.handleToolCall("execute", {
-      code: "{'x': 42, 'y': 'hello'}",
-    });
-
-    const result = await gate.handleToolCall("execute", {
-      code: "last_result",
-    });
-
-    expect(result).toEqual({ x: 42, y: "hello" });
-  });
-
-  it("explicit inputs override cached state", async () => {
-    // Populate cache with get_customer result
-    await gate.handleToolCall("execute", {
-      code: "tool('get_customer', customer_id='CUST-1')",
-    });
-
-    // Execute with explicit override — should use the override, not the cache
-    const result = await gate.execute("last_get_customer['name']", {
-      last_get_customer: { id: "CUST-X", name: "Override", email: "x@x.com", tier: "silver" },
+  it("supports explicit execute inputs without carrying prior state", async () => {
+    const result = await gate.execute("customer['name']", {
+      customer: {
+        id: "CUST-X",
+        name: "Override",
+        email: "override@example.com",
+        tier: "silver",
+      },
     });
 
     expect(result.output).toBe("Override");
   });
 
-  it("clearStateCache resets all cached state", async () => {
-    // Populate cache
-    await gate.handleToolCall("execute", {
-      code: "tool('get_customer', customer_id='CUST-1')",
-    });
-
-    gate.clearStateCache();
-
-    // Now last_get_customer should not exist — expect sandbox error
-    const result = await gate.execute("last_get_customer");
-    const output = result.output as { status: string; error: string };
-    expect(output.status).toBe("error");
-    expect(output.error).toContain("NameError");
-  });
-
-  it("cache updates on each execution (latest wins)", async () => {
-    // First call with CUST-1
-    await gate.handleToolCall("execute", {
-      code: "tool('get_customer', customer_id='CUST-1')",
-    });
-
-    // Second call with CUST-2 (returns different data but same tool)
-    gate.tool("get_customer_v2", {
-      params: z.object({ customer_id: z.string() }),
-      run: async ({ customer_id }) => ({
-        id: customer_id,
-        name: "Bob",
-        email: "bob@example.com",
-        tier: "silver",
-      }),
-    });
-
-    // Re-call get_customer — its cache entry will update
-    await gate.handleToolCall("execute", {
-      code: "tool('lookup_order', order_id='ORD-1')",
-    });
-
-    // last_lookup_order should now be the latest result
-    const result = await gate.handleToolCall("execute", {
-      code: "last_lookup_order['id']",
-    });
-    expect(result).toBe("ORD-1");
-  });
-
-  it("failed tool results are not cached", async () => {
-    gate.tool("flaky", {
-      params: z.object({}),
-      run: async () => {
-        throw new Error("boom");
-      },
-    });
-
-    // Call flaky tool — it errors but is caught by the script
-    await gate.handleToolCall("execute", {
-      code: `
-try:
-    tool('flaky')
-except:
-    pass
-'done'
-`,
-    });
-
-    // last_flaky should NOT exist in cache
-    const result = await gate.execute("last_flaky");
-    const output = result.output as { status: string; error: string };
-    expect(output.status).toBe("error");
-    expect(output.error).toContain("last_flaky");
-  });
-
-  it("state injection can be disabled via config", async () => {
-    const noStateGate = new Montygate({ stateInjection: false });
-    noStateGate.tool("get_customer", {
-      params: z.object({ customer_id: z.string() }),
-      run: async ({ customer_id }) => ({ id: customer_id, name: "Alice" }),
-    });
-
-    await noStateGate.handleToolCall("execute", {
-      code: "tool('get_customer', customer_id='CUST-1')",
-    });
-
-    // Without state injection, last_get_customer should not be available
-    const result = await noStateGate.execute("last_get_customer");
-    const output = result.output as { status: string; error: string };
-    expect(output.status).toBe("error");
-    expect(output.error).toContain("NameError");
-  });
-
-  it("multi-step pipeline works across handleToolCall calls without re-fetching", async () => {
-    const callCounts = { get_customer: 0, lookup_order: 0, process_refund: 0 };
-
-    const stepGate = new Montygate();
-    stepGate.tool("get_customer", {
-      params: z.object({ customer_id: z.string() }),
-      run: async ({ customer_id }) => {
-        callCounts.get_customer++;
-        return { id: customer_id, name: "Alice", tier: "gold" };
-      },
-    });
-    stepGate.tool("lookup_order", {
-      params: z.object({ order_id: z.string() }),
-      run: async ({ order_id }) => {
-        callCounts.lookup_order++;
-        return { id: order_id, total: 99.99, customer_id: "CUST-1" };
-      },
-    });
-    stepGate.tool("process_refund", {
-      params: z.object({ order_id: z.string(), amount: z.number() }),
-      run: async ({ order_id, amount }) => {
-        callCounts.process_refund++;
-        return { refund_id: "REF-1", order_id, amount };
-      },
-    });
-
-    // Step 1: Fetch customer and order
-    await stepGate.handleToolCall("execute", {
-      code: `
-customer = tool('get_customer', customer_id='CUST-1')
-order = tool('lookup_order', order_id='ORD-1')
-{'customer': customer, 'order': order}
-`,
-    });
-
-    // Step 2: Use cached results — no re-fetch needed
-    const result = await stepGate.handleToolCall("execute", {
-      code: `
-tool('process_refund', order_id=last_lookup_order['id'], amount=last_lookup_order['total'])
-`,
-    });
-
-    expect(result).toEqual({
-      refund_id: "REF-1",
-      order_id: "ORD-1",
-      amount: 99.99,
-    });
-
-    // Verify: get_customer and lookup_order were only called ONCE
-    expect(callCounts.get_customer).toBe(1);
-    expect(callCounts.lookup_order).toBe(1);
-    expect(callCounts.process_refund).toBe(1);
-  });
-});
-
-describe("e2e: NameError auto-retry", () => {
-  it("auto-retries when NameError variable exists in cache", async () => {
-    const gate = new Montygate();
-    gate.tool("get_customer", {
-      params: z.object({ customer_id: z.string() }),
-      run: async ({ customer_id }) => ({
-        id: customer_id,
-        name: "Alice",
-      }),
-    });
-
-    // Step 1: Populate cache
-    await gate.handleToolCall("execute", {
-      code: "tool('get_customer', customer_id='CUST-1')",
-    });
-
-    // Step 2: Script references `customer` (not `last_get_customer`) —
-    // this will NameError, but `customer` doesn't exist in cache either.
-    // However, `last_get_customer` IS available as a pre-set variable.
-    // This should work because last_get_customer is injected:
-    const result = await gate.handleToolCall("execute", {
-      code: "last_get_customer['name']",
-    });
-    expect(result).toBe("Alice");
-  });
-
-  it("auto-retry resolves missing variable from last_ prefix in cache", async () => {
-    const gate = new Montygate();
-    gate.tool("fetch_data", {
+  it("does not auto-retry missing variables based on prior executions", async () => {
+    const retryGate = new Montygate();
+    retryGate.tool("fetch_data", {
       params: z.object({}),
       run: async () => ({ value: 42 }),
     });
 
-    // Step 1: Populate cache
-    await gate.handleToolCall("execute", {
+    await retryGate.handleToolCall("execute", {
       code: "tool('fetch_data')",
     });
 
-    // Step 2: Reference `fetch_data` (bare name) — NameError triggers auto-retry
-    // auto-retry checks cache for `fetch_data` → not found, checks `last_fetch_data` → found
-    const result = await gate.handleToolCall("execute", {
-      code: "fetch_data['value']",
-    });
-
-    // The auto-retry should inject last_fetch_data as `fetch_data`
-    // fetch_data['value'] is a Python dict subscript → returns 42
-    expect(result).toBe(42);
-  });
-
-  it("propagates error when NameError variable is not in cache", async () => {
-    const gate = new Montygate();
-
-    // No prior executions — cache is empty
     await expect(
-      gate.handleToolCall("execute", { code: "unknown_var" }),
+      retryGate.handleToolCall("execute", {
+        code: "fetch_data['value']",
+      }),
     ).rejects.toThrow("NameError");
-  });
-
-  it("does not retry more than once", async () => {
-    const gate = new Montygate();
-    let callCount = 0;
-
-    gate.tool("noop", {
-      params: z.object({}),
-      run: async () => {
-        callCount++;
-        return "ok";
-      },
-    });
-
-    // Populate something in cache to trigger a retry
-    await gate.handleToolCall("execute", { code: "tool('noop')" });
-
-    // This references `bogus_var` which is NOT in cache — no retry should happen
-    await expect(
-      gate.handleToolCall("execute", { code: "bogus_var" }),
-    ).rejects.toThrow("NameError");
-
-    // noop was only called once (the initial populate call)
-    expect(callCount).toBe(1);
-  });
-});
-
-describe("e2e: state summary", () => {
-  it("getStateSummary returns null when no state cached", () => {
-    const gate = new Montygate();
-    expect(gate.getStateSummary()).toBeNull();
-  });
-
-  it("getStateSummary is non-null after tool execution", async () => {
-    const gate = new Montygate();
-    gate.tool("get_customer", {
-      params: z.object({ customer_id: z.string() }),
-      run: async () => ({ id: "CUST-1", name: "Alice" }),
-    });
-
-    await gate.handleToolCall("execute", {
-      code: "tool('get_customer', customer_id='CUST-1')",
-    });
-
-    expect(gate.getStateSummary()).not.toBeNull();
-  });
-
-  it("clearStateCache clears the summary", async () => {
-    const gate = new Montygate();
-    gate.tool("ping", {
-      params: z.object({}),
-      run: async () => "pong",
-    });
-
-    await gate.handleToolCall("execute", { code: "tool('ping')" });
-    expect(gate.getStateSummary()).not.toBeNull();
-
-    gate.clearStateCache();
-    expect(gate.getStateSummary()).toBeNull();
   });
 });
 

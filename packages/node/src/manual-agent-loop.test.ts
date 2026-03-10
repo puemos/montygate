@@ -16,14 +16,17 @@ const thisDir = path.dirname(fileURLToPath(import.meta.url));
 const benchmarkPath = path.resolve(thisDir, "../benchmark-results.json");
 const siteDir = path.resolve(thisDir, "../../../site");
 
-function makeRunResult(label: string, overrides?: Partial<{
-  roundTrips: number;
-  toolInvocations: number;
-  executeCalls: number;
-  inputTokens: number;
-  outputTokens: number;
-  costUsd: number;
-}>) {
+function makeRunResult(
+  label: string,
+  overrides?: Partial<{
+    roundTrips: number;
+    toolInvocations: number;
+    executeCalls: number;
+    inputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+  }>,
+) {
   const executeTrace = [
     {
       toolName: "lookup_order",
@@ -33,7 +36,10 @@ function makeRunResult(label: string, overrides?: Partial<{
     {
       toolName: "send_notification",
       args: { recipient: "maya.chen@example.com", channel: "email" },
-      output: { notification_id: "NOTIF-00001", recipient: "maya.chen@example.com" },
+      output: {
+        notification_id: "NOTIF-00001",
+        recipient: "maya.chen@example.com",
+      },
     },
   ];
 
@@ -112,30 +118,10 @@ function makeScenarioResult() {
       eval: makeEval(5, 5),
       savingsVsTraditional: null,
     },
-    executeOnly: {
-      key: "execute-only" as const,
-      label: "Execute-Only",
-      run: makeRunResult("execute-only", {
-        roundTrips: 2,
-        toolInvocations: 5,
-        executeCalls: 1,
-        inputTokens: 1800,
-        outputTokens: 500,
-        costUsd: 0.0052,
-      }),
-      eval: makeEval(5, 4),
-      savingsVsTraditional: {
-        roundTripsPct: 60,
-        toolInvocationsPct: 0,
-        inputTokensPct: 44,
-        outputTokensPct: 29,
-        costPct: 43,
-      },
-    },
-    hybrid: {
-      key: "hybrid" as const,
-      label: "Hybrid",
-      run: makeRunResult("hybrid", {
+    montygate: {
+      key: "montygate" as const,
+      label: "Montygate",
+      run: makeRunResult("montygate", {
         roundTrips: 2,
         toolInvocations: 5,
         executeCalls: 1,
@@ -156,41 +142,64 @@ function makeScenarioResult() {
 }
 
 describe("manual-agent-loop benchmark harness", () => {
-  it("defaults zero-arg runs to all benchmark modes", () => {
+  it("defaults zero-arg runs to traditional vs Montygate", () => {
     const originalArgv = process.argv;
 
     try {
       process.argv = ["node", "manual-agent-loop.ts"];
       expect(parseArgs()).toMatchObject({
-        modes: ["traditional", "execute-only", "hybrid"],
         runs: 1,
-        stateInjection: true,
       });
     } finally {
       process.argv = originalArgv;
     }
   });
 
-  it("runs execute-only and hybrid independently and prints them separately", async () => {
+  it("rejects removed mode and state flags", () => {
+    const originalArgv = process.argv;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exitSpy = vi
+      .spyOn(process, "exit")
+      .mockImplementation(((code?: number) => {
+        throw new Error(`exit:${code ?? 0}`);
+      }) as never);
+
+    try {
+      process.argv = [
+        "node",
+        "manual-agent-loop.ts",
+        "--mode=traditional",
+        "--no-state-injection",
+      ];
+      expect(() => parseArgs()).toThrow("exit:1");
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      process.argv = originalArgv;
+      errorSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it("runs traditional and montygate and prints one comparison table", async () => {
     const callOrder: string[] = [];
     const runners = {
       traditional: vi.fn(async () => {
         callOrder.push("traditional");
         return makeRunResult("traditional", {
           roundTrips: 5,
-        toolInvocations: 5,
-        executeCalls: 0,
-        inputTokens: 3000,
-        outputTokens: 800,
-        costUsd: 0.01,
-      });
+          toolInvocations: 5,
+          executeCalls: 0,
+          inputTokens: 3000,
+          outputTokens: 800,
+          costUsd: 0.01,
+        });
       }),
-      montygate: vi.fn(async (_scenario, mode: "execute-only" | "hybrid") => {
-        callOrder.push(mode);
-        return makeRunResult(mode, {
-          roundTrips: mode === "execute-only" ? 2 : 1,
-          inputTokens: mode === "execute-only" ? 1800 : 1400,
-          costUsd: mode === "execute-only" ? 0.005 : 0.004,
+      montygate: vi.fn(async () => {
+        callOrder.push("montygate");
+        return makeRunResult("montygate", {
+          roundTrips: 2,
+          inputTokens: 1400,
+          costUsd: 0.004,
         });
       }),
       judge: vi.fn(async (_conversation, expectations) =>
@@ -201,16 +210,13 @@ describe("manual-agent-loop benchmark harness", () => {
     const { result } = await runScenario(
       scenarios[0],
       {
-        modes: ["traditional", "execute-only", "hybrid"],
         runs: 1,
-        stateInjection: true,
       },
       runners,
     );
 
-    expect(callOrder).toEqual(["traditional", "execute-only", "hybrid"]);
-    expect(result.executeOnly?.label).toBe("Execute-Only");
-    expect(result.hybrid?.label).toBe("Hybrid");
+    expect(callOrder).toEqual(["traditional", "montygate"]);
+    expect(result.montygate?.label).toBe("Montygate");
 
     const lines: string[] = [];
     const spy = vi
@@ -218,15 +224,15 @@ describe("manual-agent-loop benchmark harness", () => {
       .mockImplementation((...args) => lines.push(args.join(" ")));
 
     try {
-      printComparisonTable(result, result.executeOnly!);
-      printComparisonTable(result, result.hybrid!);
+      printComparisonTable(result, result.montygate!);
     } finally {
       spy.mockRestore();
     }
 
     const output = lines.join("\n");
-    expect(output).toContain("Refund Pipeline (5 tools) — Execute-Only");
-    expect(output).toContain("Refund Pipeline (5 tools) — Hybrid");
+    expect(output).toContain("Refund Pipeline (5 tools) — Montygate");
+    expect(output).not.toContain("Execute-Only");
+    expect(output).not.toContain("Hybrid");
   });
 
   it("formats execute traces for the judge transcript", () => {
@@ -275,82 +281,48 @@ describe("manual-agent-loop benchmark harness", () => {
     expect(transcript).toContain("[EXECUTE RESULT - final script return value]");
   });
 
-  it("serializes the new benchmark artifact shape", () => {
+  it("serializes the benchmark artifact with one Montygate variant", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-10T16:06:55.920Z"));
 
     try {
-      const json = buildJsonOutput(
-        [makeScenarioResult()],
-        {
-          modes: ["traditional", "execute-only", "hybrid"],
-          runs: 1,
-          stateInjection: true,
-        },
-      );
+      const json = buildJsonOutput([makeScenarioResult()], { runs: 1 });
 
       expect({
         cost_scope: json.cost_scope,
-        modes: json.modes,
-        state_injection: json.state_injection,
         scenario_keys: Object.keys(json.scenarios[0] ?? {}),
         traditional_mode: json.scenarios[0]?.traditional?.mode,
-        execute_only_mode: json.scenarios[0]?.execute_only?.mode,
-        hybrid_mode: json.scenarios[0]?.hybrid?.mode,
-        execute_only_trace_tools:
-          json.scenarios[0]?.execute_only?.conversation[2]?.toolResults?.[0]?.trace?.map(
+        montygate_mode: json.scenarios[0]?.montygate?.mode,
+        montygate_trace_tools:
+          json.scenarios[0]?.montygate?.conversation[2]?.toolResults?.[0]?.trace?.map(
             (trace) => trace.toolName,
           ) ?? [],
-        hybrid_trace_tools:
-          json.scenarios[0]?.hybrid?.conversation[2]?.toolResults?.[0]?.trace?.map(
-            (trace) => trace.toolName,
-          ) ?? [],
-        traditional_trace_tools:
-          json.scenarios[0]?.traditional?.conversation[2]?.toolResults?.[0]?.trace?.map(
-            (trace) => trace.toolName,
-          ) ?? [],
-        execute_only_savings_keys: Object.keys(
-          json.scenarios[0]?.execute_only?.savings_vs_traditional ?? {},
+        montygate_savings_keys: Object.keys(
+          json.scenarios[0]?.montygate?.savings_vs_traditional ?? {},
         ),
       }).toMatchInlineSnapshot(`
         {
           "cost_scope": "agent_only_excludes_judge",
-          "execute_only_mode": "execute-only",
-          "execute_only_savings_keys": [
+          "montygate_mode": "montygate",
+          "montygate_savings_keys": [
             "round_trips_pct",
             "tool_invocations_pct",
             "input_tokens_pct",
             "output_tokens_pct",
             "cost_pct",
           ],
-          "execute_only_trace_tools": [
+          "montygate_trace_tools": [
             "lookup_order",
             "send_notification",
-          ],
-          "hybrid_mode": "hybrid",
-          "hybrid_trace_tools": [
-            "lookup_order",
-            "send_notification",
-          ],
-          "modes": [
-            "traditional",
-            "execute-only",
-            "hybrid",
           ],
           "scenario_keys": [
             "name",
             "prompt",
             "tools",
             "traditional",
-            "execute_only",
-            "hybrid",
+            "montygate",
           ],
-          "state_injection": true,
           "traditional_mode": "traditional",
-          "traditional_trace_tools": [
-            "lookup_order",
-            "send_notification",
-          ],
         }
       `);
     } finally {
@@ -360,7 +332,7 @@ describe("manual-agent-loop benchmark harness", () => {
 });
 
 describe.sequential("site build regression", () => {
-  it("builds the Astro site with the new benchmark artifact shape", () => {
+  it("builds the Astro site with the benchmark artifact shape", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-10T16:06:55.920Z"));
 
@@ -369,14 +341,7 @@ describe.sequential("site build regression", () => {
       : null;
 
     try {
-      const json = buildJsonOutput(
-        [makeScenarioResult()],
-        {
-          modes: ["traditional", "execute-only", "hybrid"],
-          runs: 1,
-          stateInjection: true,
-        },
-      );
+      const json = buildJsonOutput([makeScenarioResult()], { runs: 1 });
       fs.writeFileSync(benchmarkPath, `${JSON.stringify(json, null, 2)}\n`);
       execFileSync("pnpm", ["build"], {
         cwd: siteDir,

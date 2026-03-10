@@ -86,8 +86,7 @@ interface ToolCallRecord {
   error?: string;
 }
 
-type BenchmarkMode = "traditional" | "execute-only" | "hybrid";
-type MontygateMode = "execute-only" | "hybrid";
+type BenchmarkMode = "traditional" | "montygate";
 
 interface SavingsSummary {
   roundTripsPct: number;
@@ -110,8 +109,7 @@ interface ScenarioResult {
   toolCount: number;
   prompt: string;
   traditional: ScenarioModeResult | null;
-  executeOnly: ScenarioModeResult | null;
-  hybrid: ScenarioModeResult | null;
+  montygate: ScenarioModeResult | null;
 }
 
 interface OutcomeExpectation {
@@ -135,9 +133,7 @@ interface EvalResult {
 }
 
 interface RunBenchmarkOptions {
-  modes: BenchmarkMode[];
   runs: number;
-  stateInjection: boolean;
 }
 
 interface BenchmarkArgs extends RunBenchmarkOptions {}
@@ -148,8 +144,6 @@ interface ScenarioRunners {
   ) => Promise<AgentRunResult>;
   montygate: (
     scenario: { prompt: string; tools: ToolDef[] },
-    mode: MontygateMode,
-    stateInjection: boolean,
   ) => Promise<AgentRunResult>;
   judge: (
     conversation: ConversationEntry[],
@@ -1564,12 +1558,9 @@ async function traditionalAgentLoop(
 
 async function montygateAgentLoop(
   scenario: { prompt: string; tools: ToolDef[] },
-  mode: MontygateMode = "hybrid",
-  stateInjection = true,
 ): Promise<AgentRunResult> {
   const gate = new Montygate({
     limits: { maxConcurrent: 10, timeoutMs: 30_000 },
-    stateInjection,
   });
 
   for (const t of scenario.tools) {
@@ -1581,10 +1572,7 @@ async function montygateAgentLoop(
     });
   }
 
-  let tools = gate.anthropic() as Anthropic.Messages.Tool[];
-  if (mode === "execute-only") {
-    tools = tools.filter((t) => t.name === "execute" || t.name === "search");
-  }
+  const tools = gate.anthropic() as Anthropic.Messages.Tool[];
 
   const systemPrompt = gate.systemPrompt();
   const today = new Date().toISOString().split("T")[0];
@@ -1719,8 +1707,6 @@ async function montygateAgentLoop(
     conversation.push({ role: "tool", toolResults });
     messages.push({ role: "user", content: toolResultBlocks });
   }
-
-  gate.clearStateCache();
 
   return {
     metrics: {
@@ -1864,12 +1850,6 @@ function buildSavingsSummary(
     outputTokensPct: savingsPct(traditional.outputTokens, variant.outputTokens),
     costPct: savingsPct(traditional.costUsd, variant.costUsd),
   };
-}
-
-function getMontygateModeResults(result: ScenarioResult): ScenarioModeResult[] {
-  return [result.executeOnly, result.hybrid].filter(
-    (variant): variant is ScenarioModeResult => variant !== null,
-  );
 }
 
 function printComparisonTable(
@@ -2018,17 +1998,17 @@ function printEvalResults(
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 function parseArgs(): BenchmarkArgs {
-  const modeArg = process.argv.find((a) => a.startsWith("--mode="));
-  let modes: BenchmarkMode[];
-  if (modeArg) {
-    const mode = modeArg.split("=")[1] as BenchmarkMode;
-    if (!["traditional", "execute-only", "hybrid"].includes(mode)) {
-      console.error(`Unknown mode: ${mode}. Use traditional, execute-only, or hybrid.`);
-      process.exit(1);
-    }
-    modes = [mode];
-  } else {
-    modes = ["traditional", "execute-only", "hybrid"];
+  const removedArgs = process.argv.filter(
+    (arg) =>
+      arg.startsWith("--mode=") ||
+      arg === "--no-state-injection" ||
+      arg === "--stress-no-state-injection",
+  );
+  if (removedArgs.length > 0) {
+    console.error(
+      `Unsupported option(s): ${removedArgs.join(", ")}. This benchmark now runs Traditional vs Montygate only.`,
+    );
+    process.exit(1);
   }
 
   const runsArg = process.argv.find((a) => a.startsWith("--runs="));
@@ -2043,14 +2023,8 @@ function parseArgs(): BenchmarkArgs {
     MODEL = modelArg.split("=")[1];
   }
 
-  const stateInjection =
-    !process.argv.includes("--no-state-injection") &&
-    !process.argv.includes("--stress-no-state-injection");
-
   return {
-    modes,
     runs,
-    stateInjection,
   };
 }
 
@@ -2187,23 +2161,20 @@ function serializeScenarioMode(modeResult: ScenarioModeResult | null) {
 
 function buildJsonOutput(
   results: ScenarioResult[],
-  options: Pick<RunBenchmarkOptions, "modes" | "runs" | "stateInjection">,
+  options: Pick<RunBenchmarkOptions, "runs">,
 ) {
   return {
     timestamp: new Date().toISOString(),
     model: MODEL,
     judge_model: JUDGE_MODEL,
     runs: options.runs,
-    modes: options.modes,
-    state_injection: options.stateInjection,
     cost_scope: "agent_only_excludes_judge",
     scenarios: results.map((r) => ({
       name: r.name,
       prompt: r.prompt,
       tools: r.toolCount,
       traditional: serializeScenarioMode(r.traditional),
-      execute_only: serializeScenarioMode(r.executeOnly),
-      hybrid: serializeScenarioMode(r.hybrid),
+      montygate: serializeScenarioMode(r.montygate),
     })),
   };
 }
@@ -2221,55 +2192,37 @@ async function runScenario(
 
   const traditionalRuns: AgentRunResult[] = [];
   const traditionalEvals: EvalResult[] = [];
-  const montygateRuns: Record<MontygateMode, AgentRunResult[]> = {
-    "execute-only": [],
-    hybrid: [],
-  };
-  const montygateEvals: Record<MontygateMode, EvalResult[]> = {
-    "execute-only": [],
-    hybrid: [],
-  };
+  const montygateRuns: AgentRunResult[] = [];
+  const montygateEvals: EvalResult[] = [];
 
   for (let run = 0; run < options.runs; run++) {
     if (options.runs > 1) push(`  --- run ${run + 1}/${options.runs} ---`);
 
-    if (options.modes.includes("traditional")) {
-      const tools = resolveTools(scenario.toolNames, createIdCounters());
-      push("  [traditional] running...");
-      const trad = await runners.traditional({ prompt: scenario.prompt, tools });
-      traditionalRuns.push(trad);
-      push(
-        `  [traditional] done — ${trad.metrics.roundTrips} round-trips, ${formatNumber(trad.metrics.inputTokens)} input tokens`,
-      );
+    const traditionalTools = resolveTools(scenario.toolNames, createIdCounters());
+    push("  [traditional] running...");
+    const trad = await runners.traditional({ prompt: scenario.prompt, tools: traditionalTools });
+    traditionalRuns.push(trad);
+    push(
+      `  [traditional] done — ${trad.metrics.roundTrips} round-trips, ${formatNumber(trad.metrics.inputTokens)} input tokens`,
+    );
 
-      push("  [judge] evaluating traditional...");
-      const tradEval = await runners.judge(trad.conversation, scenario.expectations);
-      traditionalEvals.push(tradEval);
-      push(`  [judge] traditional: ${tradEval.passed}/${tradEval.total}`);
-    }
+    push("  [judge] evaluating traditional...");
+    const tradEval = await runners.judge(trad.conversation, scenario.expectations);
+    traditionalEvals.push(tradEval);
+    push(`  [judge] traditional: ${tradEval.passed}/${tradEval.total}`);
 
-    for (const mode of ["execute-only", "hybrid"] as const) {
-      if (!options.modes.includes(mode)) {
-        continue;
-      }
+    const montygateTools = resolveTools(scenario.toolNames, createIdCounters());
+    push("  [montygate] running...");
+    const mg = await runners.montygate({ prompt: scenario.prompt, tools: montygateTools });
+    montygateRuns.push(mg);
+    push(
+      `  [montygate] done — ${mg.metrics.roundTrips} round-trips, ${formatNumber(mg.metrics.inputTokens)} input tokens`,
+    );
 
-      const tools = resolveTools(scenario.toolNames, createIdCounters());
-      push(`  [montygate:${mode}] running...`);
-      const mg = await runners.montygate(
-        { prompt: scenario.prompt, tools },
-        mode,
-        options.stateInjection,
-      );
-      montygateRuns[mode].push(mg);
-      push(
-        `  [montygate:${mode}] done — ${mg.metrics.roundTrips} round-trips, ${formatNumber(mg.metrics.inputTokens)} input tokens`,
-      );
-
-      push(`  [judge] evaluating montygate:${mode}...`);
-      const mgEval = await runners.judge(mg.conversation, scenario.expectations);
-      montygateEvals[mode].push(mgEval);
-      push(`  [judge] montygate:${mode}: ${mgEval.passed}/${mgEval.total}`);
-    }
+    push("  [judge] evaluating montygate...");
+    const mgEval = await runners.judge(mg.conversation, scenario.expectations);
+    montygateEvals.push(mgEval);
+    push(`  [judge] montygate: ${mgEval.passed}/${mgEval.total}`);
   }
 
   const traditional = buildScenarioModeResult(
@@ -2279,29 +2232,20 @@ async function runScenario(
     traditionalEvals,
   );
   const traditionalMetrics = traditional?.run.metrics ?? null;
-  const executeOnly = buildScenarioModeResult(
-    "execute-only",
-    "Execute-Only",
-    montygateRuns["execute-only"],
-    montygateEvals["execute-only"],
-    traditionalMetrics,
-  );
-  const hybrid = buildScenarioModeResult(
-    "hybrid",
-    "Hybrid",
-    montygateRuns.hybrid,
-    montygateEvals.hybrid,
+  const montygate = buildScenarioModeResult(
+    "montygate",
+    "Montygate",
+    montygateRuns,
+    montygateEvals,
     traditionalMetrics,
   );
 
   if (options.runs > 1) {
     const tradScores = traditionalEvals.map((e) => `${e.passed}/${e.total}`);
     if (tradScores.length > 0) push(`  [summary] traditional evals: ${tradScores.join(", ")}`);
-    for (const mode of ["execute-only", "hybrid"] as const) {
-      const scores = montygateEvals[mode].map((e) => `${e.passed}/${e.total}`);
-      if (scores.length > 0) {
-        push(`  [summary] montygate:${mode} evals: ${scores.join(", ")}`);
-      }
+    const montygateScores = montygateEvals.map((e) => `${e.passed}/${e.total}`);
+    if (montygateScores.length > 0) {
+      push(`  [summary] montygate evals: ${montygateScores.join(", ")}`);
     }
   }
 
@@ -2310,8 +2254,7 @@ async function runScenario(
     toolCount: scenario.toolNames.length,
     prompt: scenario.prompt,
     traditional,
-    executeOnly,
-    hybrid,
+    montygate,
   };
 
   return { result, log };
@@ -2340,18 +2283,15 @@ async function runBenchmark(
 
 async function main() {
   const options = parseArgs();
-  const { modes, runs, stateInjection } = options;
+  const { runs } = options;
 
   console.log("Montygate vs Traditional — Real LLM Eval (LLM-as-Judge)");
   console.log(`Model: ${MODEL}`);
   console.log(`Judge: ${JUDGE_MODEL}`);
   console.log(`Scenarios: ${scenarios.length}`);
-  console.log(`Modes: ${modes.join(", ")}`);
+  console.log("Comparison: traditional vs Montygate");
   if (runs > 1) console.log(`Runs per scenario: ${runs}`);
   console.log("Scenario execution: parallel");
-  console.log(
-    `State injection: ${stateInjection ? "enabled (default product behavior)" : "disabled (stress mode)"}`,
-  );
   console.log();
 
   const results = await runBenchmark(options);
@@ -2370,12 +2310,12 @@ async function main() {
         result.traditional.run.metrics,
       );
     }
-    for (const variant of getMontygateModeResults(result)) {
+    if (result.montygate?.run.conversation.length) {
       printConversation(
         result.name,
-        `Montygate ${variant.label}`,
-        variant.run.conversation,
-        variant.run.metrics,
+        "Montygate",
+        result.montygate.run.conversation,
+        result.montygate.run.metrics,
       );
     }
   }
@@ -2386,11 +2326,8 @@ async function main() {
   console.log("=".repeat(70));
 
   for (const result of results) {
-    if (!result.traditional) {
-      continue;
-    }
-    for (const variant of getMontygateModeResults(result)) {
-      printEvalResults(result.name, result.traditional, variant);
+    if (result.traditional && result.montygate) {
+      printEvalResults(result.name, result.traditional, result.montygate);
     }
   }
 
@@ -2400,8 +2337,8 @@ async function main() {
   console.log("=".repeat(70));
 
   for (const result of results) {
-    for (const variant of getMontygateModeResults(result)) {
-      printComparisonTable(result, variant);
+    if (result.montygate) {
+      printComparisonTable(result, result.montygate);
     }
   }
 
@@ -2429,7 +2366,6 @@ export {
   buildJudgePrompt,
   buildJsonOutput,
   formatConversationForJudge,
-  getMontygateModeResults,
   parseArgs,
   printComparisonTable,
   runBenchmark,

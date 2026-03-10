@@ -57,34 +57,6 @@ export function buildTraceSummary(trace: TraceEntry[]): string | null {
   return parts.join("\n");
 }
 
-/**
- * Build a concise summary of cached state for injection into LLM context.
- * Returns `null` if the cache is empty.
- */
-export function buildStateSummary(
-  stateCache: Record<string, unknown>,
-): string | null {
-  const entries = Object.entries(stateCache).filter(
-    ([key]) => key.startsWith("last_") && key !== "last_result",
-  );
-  if (entries.length === 0) return null;
-
-  const lines: string[] = ["[Prior state — available as pre-set variables]"];
-  for (const [key, value] of entries) {
-    const toolName = key.slice(5); // strip "last_"
-    const json = summarize(value);
-    const keys = extractKeys(value);
-    const keyHint = keys ? ` (keys: ${keys})` : "";
-    lines.push(`  ${key} = ${json}${keyHint}  // from ${toolName}()`);
-  }
-
-  if (stateCache["last_result"] !== undefined) {
-    lines.push(`  last_result = ${summarize(stateCache["last_result"])}`);
-  }
-
-  return lines.join("\n");
-}
-
 function extractKeys(value: unknown): string | null {
   if (value != null && typeof value === "object" && !Array.isArray(value)) {
     const keys = Object.keys(value as Record<string, unknown>);

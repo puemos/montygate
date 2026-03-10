@@ -11,18 +11,6 @@ export interface MontygateConfig {
   tools?: AnyToolDefinition[] | Record<string, AnyToolDefinition>;
   /** Handler map for tool formats without embedded handlers. */
   handlers?: ToolHandlerMap;
-  /**
-   * Enable automatic state injection between execute() calls.
-   * When enabled, successful tool results from prior executions are
-   * injected as `last_<tool_name>` variables, and the prior script's
-   * output is injected as `last_result`.
-   *
-   * Also enables auto-retry on NameError when the missing variable
-   * exists in the cache.
-   *
-   * @default true
-   */
-  stateInjection?: boolean;
 }
 
 export interface RetryConfig {

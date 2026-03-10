@@ -59,38 +59,16 @@ type ModeData = {
   savings_vs_traditional: Savings | null;
 };
 
-type LegacyScenario = {
-  name: string;
-  prompt: string;
-  tools: number;
-  traditional: {
-    metrics: Metrics;
-    conversation: ConversationMessage[];
-  };
-  montygate: {
-    metrics: Metrics;
-    conversation: ConversationMessage[];
-  };
-  eval: {
-    traditional: EvalResult;
-    montygate: EvalResult;
-  };
-  savings: Savings;
-};
-
-type ModernScenario = {
+type Scenario = {
   name: string;
   prompt: string;
   tools: number;
   traditional: ModeData | null;
-  execute_only: ModeData | null;
-  hybrid: ModeData | null;
+  montygate: ModeData | null;
 };
 
-export type BenchmarkModeKey = "execute_only" | "hybrid";
-
 export type NormalizedMode = {
-  key: "traditional" | BenchmarkModeKey;
+  key: "traditional" | "montygate";
   label: string;
   metrics: Metrics;
   conversation: ConversationMessage[];
@@ -103,8 +81,7 @@ export type NormalizedScenario = {
   prompt: string;
   tools: number;
   traditional: NormalizedMode | null;
-  execute_only: NormalizedMode | null;
-  hybrid: NormalizedMode | null;
+  montygate: NormalizedMode | null;
 };
 
 export type BenchmarkTableRow = {
@@ -115,72 +92,31 @@ export type BenchmarkTableRow = {
   eval: EvalResult;
 };
 
-export function normalizeBenchmarkData(data: {
-  scenarios: Array<LegacyScenario | ModernScenario>;
-}) {
-  const scenarios = data.scenarios.map(normalizeScenario);
-  const availableModes = ([
-    { key: "hybrid", label: "Hybrid" },
-    { key: "execute_only", label: "Execute-Only" },
-  ] as const).filter(({ key }) => scenarios.some((scenario) => scenario[key]));
-  const defaultMode = availableModes[0]?.key ?? "execute_only";
+export function normalizeBenchmarkData(data: { scenarios: Scenario[] }) {
+  const scenarios = data.scenarios.map((scenario) => ({
+    name: scenario.name,
+    prompt: scenario.prompt,
+    tools: scenario.tools,
+    traditional: normalizeMode(
+      "traditional",
+      scenario.traditional,
+      "Traditional",
+    ),
+    montygate: normalizeMode(
+      "montygate",
+      scenario.montygate,
+      scenario.montygate?.label ?? "Montygate",
+    ),
+  }));
 
   return {
     scenarios,
-    availableModes,
-    defaultMode,
     tableRows: buildBenchmarkTableRows(scenarios),
   };
 }
 
-function normalizeScenario(
-  scenario: LegacyScenario | ModernScenario,
-): NormalizedScenario {
-  if ("execute_only" in scenario || "hybrid" in scenario) {
-    return {
-      name: scenario.name,
-      prompt: scenario.prompt,
-      tools: scenario.tools,
-      traditional: normalizeMode("traditional", scenario.traditional, "Traditional"),
-      execute_only: normalizeMode(
-        "execute_only",
-        scenario.execute_only,
-        scenario.execute_only?.label ?? "Execute-Only",
-      ),
-      hybrid: normalizeMode(
-        "hybrid",
-        scenario.hybrid,
-        scenario.hybrid?.label ?? "Hybrid",
-      ),
-    };
-  }
-
-  return {
-    name: scenario.name,
-    prompt: scenario.prompt,
-    tools: scenario.tools,
-    traditional: {
-      key: "traditional",
-      label: "Traditional",
-      metrics: scenario.traditional.metrics,
-      conversation: scenario.traditional.conversation,
-      eval: scenario.eval.traditional,
-      savingsVsTraditional: null,
-    },
-    execute_only: {
-      key: "execute_only",
-      label: "Execute-Only",
-      metrics: scenario.montygate.metrics,
-      conversation: scenario.montygate.conversation,
-      eval: scenario.eval.montygate,
-      savingsVsTraditional: scenario.savings,
-    },
-    hybrid: null,
-  };
-}
-
 function normalizeMode(
-  key: "traditional" | BenchmarkModeKey,
+  key: "traditional" | "montygate",
   mode: ModeData | null,
   fallbackLabel: string,
 ): NormalizedMode | null {
@@ -204,20 +140,18 @@ function buildBenchmarkTableRows(
   const rows: BenchmarkTableRow[] = [];
 
   for (const scenario of scenarios) {
-    for (const key of ["execute_only", "hybrid"] as const) {
-      const variant = scenario[key];
-      if (!variant || !variant.savingsVsTraditional) {
-        continue;
-      }
-
-      rows.push({
-        scenario: scenario.name,
-        tools: scenario.tools,
-        mode: variant.label,
-        savings: variant.savingsVsTraditional,
-        eval: variant.eval,
-      });
+    const variant = scenario.montygate;
+    if (!variant?.savingsVsTraditional) {
+      continue;
     }
+
+    rows.push({
+      scenario: scenario.name,
+      tools: scenario.tools,
+      mode: variant.label,
+      savings: variant.savingsVsTraditional,
+      eval: variant.eval,
+    });
   }
 
   return rows;

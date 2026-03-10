@@ -14,10 +14,7 @@ import type {
   ToolOptions,
   TraceEntry,
 } from "./types.js";
-import {
-  buildStateSummary,
-  unwrapExecutionResult,
-} from "./adapters/utils.js";
+import { unwrapExecutionResult } from "./adapters/utils.js";
 
 /**
  * Binding types from the native NAPI module.
@@ -164,13 +161,6 @@ export class Montygate {
   private native: NativeEngine;
   private toolHandles = new Map<string, ToolHandle>();
   private zodParams = new Map<string, z.ZodType>();
-  private stateInjectionEnabled: boolean;
-
-  /**
-   * Cached tool results from prior execute() calls, keyed by `last_<tool_name>`.
-   * Also contains `last_result` (the prior script's final output).
-   */
-  private stateCache: Record<string, unknown> = {};
 
   constructor(config?: MontygateConfig) {
     if (!NativeEngineClass) {
@@ -216,8 +206,6 @@ export class Montygate {
     this.native = new NativeEngineClass(
       Object.keys(nativeConfig).length > 0 ? nativeConfig : undefined,
     ) as NativeEngine;
-
-    this.stateInjectionEnabled = config?.stateInjection !== false;
 
     if (config?.tools) {
       this.tools(config.tools, config.handlers);
@@ -431,79 +419,6 @@ export class Montygate {
   }
 
   /**
-   * Clear all cached state from prior execute() calls.
-   * Call this between conversations to reset the injection context.
-   */
-  clearStateCache(): void {
-    this.stateCache = {};
-  }
-
-  /**
-   * Get a human-readable summary of the accumulated state cache.
-   * Useful for appending to system prompts in agent loops so the LLM
-   * knows which prior results are available.
-   *
-   * Returns `null` if no state has been cached yet.
-   */
-  getStateSummary(): string | null {
-    return buildStateSummary(this.stateCache);
-  }
-
-  // --- Private helpers ---
-
-  /**
-   * Execute a script with automatic state injection and NameError auto-retry.
-   *
-   * 1. Merges cached tool results into the sandbox as `last_<tool>` variables.
-   * 2. Runs the script.
-   * 3. On success, updates the cache with new tool results.
-   * 4. On NameError for a variable that exists in the cache, retries once
-   *    with the missing variable explicitly injected.
-   */
-  private async executeWithStateInjection(
-    code: string,
-    explicitInputs?: Record<string, unknown>,
-  ): Promise<ExecutionResult> {
-    const merged = this.stateInjectionEnabled
-      ? { ...this.stateCache, ...(explicitInputs ?? {}) }
-      : (explicitInputs ?? {});
-
-    const result = await this.execute(code, merged);
-    this.updateCacheFromResult(result);
-
-    // Auto-retry: if the error is a NameError for a cached variable, retry once
-    if (this.stateInjectionEnabled && isNameError(result)) {
-      const varName = extractNameErrorVariable(result);
-      if (varName) {
-        const cached =
-          this.stateCache[varName] ?? this.stateCache[`last_${varName}`];
-        if (cached !== undefined) {
-          const retryInputs = { ...merged, [varName]: cached };
-          const retryResult = await this.execute(code, retryInputs);
-          this.updateCacheFromResult(retryResult);
-          return retryResult;
-        }
-      }
-    }
-
-    return result;
-  }
-
-  private updateCacheFromResult(result: ExecutionResult): void {
-    if (!this.stateInjectionEnabled) return;
-
-    for (const entry of result.trace) {
-      if (entry.output !== undefined && !entry.error) {
-        this.stateCache[`last_${entry.toolName}`] = entry.output;
-      }
-    }
-    // Only cache output for successful executions (no sandbox error)
-    if (!isNameError(result)) {
-      this.stateCache["last_result"] = result.output;
-    }
-  }
-
-  /**
    * If the result is a NameError whose undefined name matches a registered
    * tool, replace the generic error with a targeted hint telling the LLM
    * to use the tool() calling convention.
@@ -623,7 +538,7 @@ export class Montygate {
         code: z.string().describe("Python script to execute"),
       }),
       execute: async (args) => {
-        const raw = await this.executeWithStateInjection(args.code as string);
+        const raw = await this.execute(args.code as string);
         const result = this.enhanceNameError(raw);
         return unwrapExecutionResult(result);
       },
@@ -649,10 +564,6 @@ export class Montygate {
   /**
    * Handle a tool call from any LLM framework.
    * Accepts either an object (Anthropic) or a JSON string (OpenAI) as args.
-   *
-   * When state injection is enabled (default), `execute` calls automatically
-   * receive cached results from prior executions as sandbox variables,
-   * and NameErrors for cached variables are auto-retried.
    */
   async handleToolCall(
     name: string,
@@ -664,7 +575,7 @@ export class Montygate {
         : args;
 
     if (name === "execute") {
-      const raw = await this.executeWithStateInjection(input.code as string);
+      const raw = await this.execute(input.code as string);
       const result = this.enhanceNameError(raw);
       return unwrapExecutionResult(result);
     } else if (name === "search") {
@@ -740,36 +651,6 @@ function mapSearchResult(result: NativeSearchResult): SearchResult {
       ? (result.outputSchema as Record<string, unknown>)
       : undefined,
   };
-}
-
-function isNameError(result: ExecutionResult): boolean {
-  const output = result.output;
-  if (
-    output != null &&
-    typeof output === "object" &&
-    !Array.isArray(output) &&
-    (output as Record<string, unknown>).status === "error"
-  ) {
-    const err = (output as Record<string, unknown>).error;
-    return typeof err === "string" && NAME_ERROR_RE.test(err);
-  }
-  return false;
-}
-
-function extractNameErrorVariable(result: ExecutionResult): string | null {
-  const output = result.output;
-  if (
-    output != null &&
-    typeof output === "object" &&
-    !Array.isArray(output)
-  ) {
-    const err = (output as Record<string, unknown>).error;
-    if (typeof err === "string") {
-      const match = err.match(NAME_ERROR_RE);
-      return match ? match[1] : null;
-    }
-  }
-  return null;
 }
 
 function mapExecutionResult(raw: NativeExecutionResult): ExecutionResult {

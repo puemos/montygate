@@ -8,8 +8,6 @@ function createMockEngine(): Montygate {
   const catalog = "- lookup_order(order_id: string) - Look up an order\n";
   const signatures = "- lookup_order(order_id) - Look up an order\n";
   const engine = {
-    stateInjectionEnabled: true,
-    stateCache: {} as Record<string, unknown>,
     toolHandles: new Map([["lookup_order", {
       name: "lookup_order",
       description: "Look up an order",
@@ -71,10 +69,8 @@ function createMockEngine(): Montygate {
   engine.openai = Montygate.prototype.openai.bind(engine);
   engine.vercelai = Montygate.prototype.vercelai.bind(engine);
   engine.handleToolCall = Montygate.prototype.handleToolCall.bind(engine);
-  // Bind private methods needed by handleToolCall and vercelai
+  // Bind private method needed by handleToolCall and vercelai
   const proto = Montygate.prototype as unknown as Record<string, unknown>;
-  engine.executeWithStateInjection = (proto.executeWithStateInjection as Function).bind(engine);
-  engine.updateCacheFromResult = (proto.updateCacheFromResult as Function).bind(engine);
   engine.enhanceNameError = (proto.enhanceNameError as Function).bind(engine);
   return engine as unknown as Montygate;
 }
@@ -213,11 +209,7 @@ describe("gate.handleToolCall()", () => {
       code: "tool('lookup_order', order_id='123')",
     });
     expect(result).toEqual({ id: "123", status: "shipped" });
-    // execute is called with code + injected state cache (empty on first call)
-    expect(engine.execute).toHaveBeenCalledWith(
-      "tool('lookup_order', order_id='123')",
-      {},
-    );
+    expect(engine.execute).toHaveBeenCalledWith("tool('lookup_order', order_id='123')");
   });
 
   it("dispatches execute call with JSON string args (OpenAI style)", async () => {
@@ -434,8 +426,6 @@ describe("buildTraceSummary", () => {
 describe("adapter error detection", () => {
   function createErrorEngine(): Montygate {
     const engine = {
-      stateInjectionEnabled: true,
-      stateCache: {} as Record<string, unknown>,
       toolHandles: new Map<string, unknown>(),
       zodParams: new Map(),
       getToolCatalog: vi.fn(() => ""),
@@ -485,8 +475,6 @@ describe("adapter error detection", () => {
     engine.handleToolCall = Montygate.prototype.handleToolCall.bind(engine);
     engine.vercelai = Montygate.prototype.vercelai.bind(engine);
     const proto = Montygate.prototype as unknown as Record<string, unknown>;
-    engine.executeWithStateInjection = (proto.executeWithStateInjection as Function).bind(engine);
-    engine.updateCacheFromResult = (proto.updateCacheFromResult as Function).bind(engine);
     engine.enhanceNameError = (proto.enhanceNameError as Function).bind(engine);
     return engine as unknown as Montygate;
   }
@@ -521,8 +509,6 @@ describe("enhanceNameError", () => {
   ): Montygate {
     const errorName = toolName;
     const engine = {
-      stateInjectionEnabled: true,
-      stateCache: {} as Record<string, unknown>,
       toolHandles: hasRegisteredTool
         ? new Map([[toolName, { name: toolName, description: "A tool", inputSchema: {} }]])
         : new Map<string, unknown>(),
@@ -564,8 +550,6 @@ describe("enhanceNameError", () => {
     engine.handleToolCall = Montygate.prototype.handleToolCall.bind(engine);
     engine.vercelai = Montygate.prototype.vercelai.bind(engine);
     const proto = Montygate.prototype as unknown as Record<string, unknown>;
-    engine.executeWithStateInjection = (proto.executeWithStateInjection as Function).bind(engine);
-    engine.updateCacheFromResult = (proto.updateCacheFromResult as Function).bind(engine);
     engine.enhanceNameError = (proto.enhanceNameError as Function).bind(engine);
     return engine as unknown as Montygate;
   }
